@@ -743,7 +743,7 @@ func TestMergeRequestList_LabelPriorityDefaultsToAsc(t *testing.T) {
 	// Setup mock - verify sort=asc is passed when order=label_priority
 	testClient.MockMergeRequests.EXPECT().
 		ListProjectMergeRequests("OWNER/REPO", gomock.Any()).
-		DoAndReturn(func(pid interface{}, opts *gitlab.ListProjectMergeRequestsOptions, options ...gitlab.RequestOptionFunc) ([]*gitlab.BasicMergeRequest, *gitlab.Response, error) {
+		DoAndReturn(func(pid any, opts *gitlab.ListProjectMergeRequestsOptions, options ...gitlab.RequestOptionFunc) ([]*gitlab.BasicMergeRequest, *gitlab.Response, error) {
 			assert.Equal(t, "label_priority", *opts.OrderBy)
 			assert.Equal(t, "asc", *opts.Sort)
 			return []*gitlab.BasicMergeRequest{}, nil, nil
@@ -770,7 +770,7 @@ func TestMergeRequestList_PriorityDefaultsToAsc(t *testing.T) {
 	// Setup mock - verify sort=asc is passed when order=priority
 	testClient.MockMergeRequests.EXPECT().
 		ListProjectMergeRequests("OWNER/REPO", gomock.Any()).
-		DoAndReturn(func(pid interface{}, opts *gitlab.ListProjectMergeRequestsOptions, options ...gitlab.RequestOptionFunc) ([]*gitlab.BasicMergeRequest, *gitlab.Response, error) {
+		DoAndReturn(func(pid any, opts *gitlab.ListProjectMergeRequestsOptions, options ...gitlab.RequestOptionFunc) ([]*gitlab.BasicMergeRequest, *gitlab.Response, error) {
 			assert.Equal(t, "priority", *opts.OrderBy)
 			assert.Equal(t, "asc", *opts.Sort)
 			return []*gitlab.BasicMergeRequest{}, nil, nil
@@ -797,7 +797,7 @@ func TestMergeRequestList_CreatedAtDefaultsToDesc(t *testing.T) {
 	// Setup mock - verify sort=desc is passed when order=created_at
 	testClient.MockMergeRequests.EXPECT().
 		ListProjectMergeRequests("OWNER/REPO", gomock.Any()).
-		DoAndReturn(func(pid interface{}, opts *gitlab.ListProjectMergeRequestsOptions, options ...gitlab.RequestOptionFunc) ([]*gitlab.BasicMergeRequest, *gitlab.Response, error) {
+		DoAndReturn(func(pid any, opts *gitlab.ListProjectMergeRequestsOptions, options ...gitlab.RequestOptionFunc) ([]*gitlab.BasicMergeRequest, *gitlab.Response, error) {
 			assert.Equal(t, "created_at", *opts.OrderBy)
 			assert.Equal(t, "desc", *opts.Sort)
 			return []*gitlab.BasicMergeRequest{}, nil, nil
@@ -824,7 +824,7 @@ func TestMergeRequestList_ExplicitSortOverridesDefault(t *testing.T) {
 	// Setup mock - verify explicit --sort desc overrides the default asc for label_priority
 	testClient.MockMergeRequests.EXPECT().
 		ListProjectMergeRequests("OWNER/REPO", gomock.Any()).
-		DoAndReturn(func(pid interface{}, opts *gitlab.ListProjectMergeRequestsOptions, options ...gitlab.RequestOptionFunc) ([]*gitlab.BasicMergeRequest, *gitlab.Response, error) {
+		DoAndReturn(func(pid any, opts *gitlab.ListProjectMergeRequestsOptions, options ...gitlab.RequestOptionFunc) ([]*gitlab.BasicMergeRequest, *gitlab.Response, error) {
 			assert.Equal(t, "label_priority", *opts.OrderBy)
 			assert.Equal(t, "desc", *opts.Sort)
 			return []*gitlab.BasicMergeRequest{}, nil, nil
