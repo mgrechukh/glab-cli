@@ -391,10 +391,7 @@ func (s *IOStreams) Select(ctx context.Context, result *string, title string, op
 
 func (s *IOStreams) MultiSelect(ctx context.Context, result *[]string, title string, options []string) error {
 	// Set a reasonable height limit for the multiselect to ensure it displays properly
-	limit := 10
-	if len(options) < limit {
-		limit = len(options)
-	}
+	limit := min(len(options), 10)
 
 	return s.Run(ctx,
 		huh.NewMultiSelect[string]().
