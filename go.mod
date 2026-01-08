@@ -18,7 +18,7 @@ require (
 	github.com/charmbracelet/huh v0.8.0
 	github.com/coder/websocket v1.8.14
 	github.com/docker/cli v29.1.3+incompatible
-	github.com/docker/docker-credential-helpers v0.9.4
+	github.com/docker/docker-credential-helpers v0.9.5
 	github.com/dustin/go-humanize v1.0.1
 	github.com/gdamore/tcell/v2 v2.12.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
