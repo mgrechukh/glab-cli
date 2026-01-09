@@ -303,15 +303,19 @@ func createMR(client *gitlab.Client, opts *options, ref *git.StackRef, gr git.Gi
 		previousBranch = opts.stack.Refs[ref.Prev].Branch
 	}
 
+	parts := strings.SplitN(ref.Description, "\n", 2)
+	title := strings.TrimSpace(parts[0])
+	if len(title) > maxMRTitleSize {
+		title = title[0:68] + "..."
+	}
 	var description string
-	if len(ref.Description) > maxMRTitleSize {
-		description = ref.Description[0:68] + "..."
-	} else {
-		description = ref.Description
+	if len(parts) > 1 {
+		description = strings.TrimSpace(parts[1])
 	}
 
 	l := &gitlab.CreateMergeRequestOptions{
-		Title:              gitlab.Ptr(description),
+		Title:              gitlab.Ptr(title),
+		Description:        gitlab.Ptr(description),
 		SourceBranch:       gitlab.Ptr(ref.Branch),
 		TargetBranch:       gitlab.Ptr(previousBranch),
 		AssigneeID:         gitlab.Ptr(opts.user.ID),
