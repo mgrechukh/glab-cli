@@ -56,7 +56,7 @@ func mocks(t *testing.T, tc *gitlab_testing.TestClient) {
 }
 
 func Test_AttestationVerify(t *testing.T) {
-	t.Setenv("NO_COLOR", "true")
+	t.Parallel()
 
 	ctrl := gomock.NewController(t)
 	tc := gitlab_testing.NewTestClientWithCtrl(ctrl)
@@ -93,7 +93,7 @@ func Test_AttestationVerify(t *testing.T) {
 }
 
 func Test_AttestationVerify_Failure(t *testing.T) {
-	t.Setenv("NO_COLOR", "true")
+	t.Parallel()
 
 	ctrl := gomock.NewController(t)
 	tc := gitlab_testing.NewTestClientWithCtrl(ctrl)
