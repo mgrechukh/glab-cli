@@ -98,17 +98,16 @@ func NewCmdRoot(f cmdutils.Factory) *cobra.Command {
 			VISUAL, EDITOR (in order of precedence): The editor tool to use for authoring text.
 			Can be set in the config with 'glab config set editor vim'.
 
-			GLAB_ENABLE_CI_AUTOLOGIN [EXPERIMENTAL]: Set to true to enable auto-login in GitLab CI.
-			CI auto-login detects if glab is running in a GitLab CI job by checking the
-			predefined CI/CD variable 'GITLAB_CI'. If detected, it uses other predefined CI/CD variables
-			like 'CI_SERVER_FQDN' and 'CI_JOB_TOKEN' to log in.
-			Predefined CI/CD variables have the lowest priority. Even with auto-login enabled,
-			configuration-mapped variables like 'GITLAB_TOKEN' or 'GITLAB_HOST' take precedence over
-			the corresponding predefined variables.
-			Only glab commands that support 'CI_JOB_TOKEN' are available.
-			For a list of supported commands, see: https://docs.gitlab.com/ci/jobs/ci_job_token/#job-token-access.
-			This flag is experimental.
-			Use it with caution and leave feedback in https://gitlab.com/gitlab-org/cli/-/work_items/8071.
+			GLAB_ENABLE_CI_AUTOLOGIN [EXPERIMENTAL]: Set to %[1]strue%[1]s to enable auto-login in GitLab CI.
+			CI auto-login detects if glab is running in a GitLab CI job by checking the predefined
+			CI/CD variable %[1]sGITLAB_CI%[1]s. 
+			If detected, it uses predefined CI/CD variables like %[1]sCI_SERVER_FQDN%[1]s and %[1]sCI_JOB_TOKEN%[1]s
+			to log in, and ignores other variables like %[1]sGITLAB_HOST%[1]s or %[1]sGITLAB_TOKEN%[1]s.
+			Only glab commands that support %[1]sCI_JOB_TOKEN%[1]s are available.
+			For a list of supported commands, see the CI/CD job token documentation:
+			https://docs.gitlab.com/ci/jobs/ci_job_token/#job-token-access.
+			This flag is experimental. Use with caution and leave feedback in issue 8071:
+			https://gitlab.com/gitlab-org/cli/-/work_items/8071.
 		`, "`"),
 			"help:feedback": heredoc.Docf(`
 			Encountered a bug or want to suggest a feature?
