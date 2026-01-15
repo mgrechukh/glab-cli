@@ -374,7 +374,20 @@ func SetupCmdForTest(t *testing.T, cmdFunc CmdFunc, isTTY bool, opts ...FactoryO
 	f := NewTestFactory(ios, opts...)
 	return func(cli string) (*test.CmdOut, error) {
 		defer f.cleanup()
-		return ExecuteCommand(cmdFunc(f), cli, &f.stdout, &f.stderr)
+
+		argv, err := shlex.Split(cli)
+		if err != nil {
+			return nil, err
+		}
+
+		cmd := cmdFunc(f)
+		cmd.SetArgs(argv)
+
+		_, err = cmd.ExecuteC()
+		return &test.CmdOut{
+			OutBuf: &f.stdout,
+			ErrBuf: &f.stderr,
+		}, err
 	}
 }
 
@@ -419,24 +432,6 @@ func WithResponder(t *testing.T, responder *huhtest.Responder) FactoryOption {
 
 		f.execSetup = append(f.execSetup, startResponder)
 	}
-}
-
-func ExecuteCommand(cmd *cobra.Command, cli string, stdout *bytes.Buffer, stderr *bytes.Buffer) (*test.CmdOut, error) {
-	argv, err := shlex.Split(cli)
-	if err != nil {
-		return nil, err
-	}
-
-	cmd.SetArgs(argv)
-	cmd.SetIn(&bytes.Buffer{})
-	cmd.SetOut(io.Discard)
-	cmd.SetErr(io.Discard)
-
-	_, err = cmd.ExecuteC()
-	return &test.CmdOut{
-		OutBuf: stdout,
-		ErrBuf: stderr,
-	}, err
 }
 
 func CopyTestRepo(log fatalLogger, name string) string {
