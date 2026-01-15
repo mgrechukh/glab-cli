@@ -29,4 +29,3 @@ func ExecuteCommand(cmd *cobra.Command, cli string, stdout *bytes.Buffer, stderr
 		ErrBuf: stderr,
 	}, err
 }
-
