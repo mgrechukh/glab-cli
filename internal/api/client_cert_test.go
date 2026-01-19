@@ -16,11 +16,12 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
 	gitlab "gitlab.com/gitlab-org/api/client-go"
 )
 
 // generateTestCert generates a self-signed certificate for testing
-func generateTestCert(t *testing.T) (certFile, keyFile string) {
+func generateTestCert(t *testing.T) (string, string) {
 	t.Helper()
 
 	// Generate private key
@@ -46,7 +47,7 @@ func generateTestCert(t *testing.T) (certFile, keyFile string) {
 	require.NoError(t, err)
 
 	// Write certificate to temp file
-	certFile = t.TempDir() + "/test-client.crt"
+	certFile := t.TempDir() + "/test-client.crt"
 	certOut, err := os.Create(certFile)
 	require.NoError(t, err)
 	err = pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: certBytes})
@@ -54,7 +55,7 @@ func generateTestCert(t *testing.T) (certFile, keyFile string) {
 	certOut.Close()
 
 	// Write private key to temp file
-	keyFile = t.TempDir() + "/test-client.key"
+	keyFile := t.TempDir() + "/test-client.key"
 	keyOut, err := os.Create(keyFile)
 	require.NoError(t, err)
 	err = pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)})
