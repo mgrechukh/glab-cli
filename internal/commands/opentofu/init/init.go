@@ -3,6 +3,8 @@ package init
 import (
 	"context"
 	"fmt"
+	"io"
+	"os/exec"
 
 	"github.com/MakeNowJust/heredoc/v2"
 	"github.com/spf13/cobra"
@@ -17,10 +19,10 @@ import (
 )
 
 type options struct {
-	io        *iostreams.IOStreams
-	baseRepo  func() (glrepo.Interface, error)
-	apiClient func(repoHost string) (*api.Client, error)
-	exec      cmdutils.Executor
+	io         *iostreams.IOStreams
+	baseRepo   func() (glrepo.Interface, error)
+	apiClient  func(repoHost string) (*api.Client, error)
+	runCommand RunCommandFunc
 
 	stateName string
 	binary    string
@@ -28,12 +30,14 @@ type options struct {
 	initArgs  []string
 }
 
-func NewCmd(f cmdutils.Factory) *cobra.Command {
+type RunCommandFunc func(stdout, stderr io.Writer, binary string, args []string) error
+
+func NewCmd(f cmdutils.Factory, runCommand RunCommandFunc) *cobra.Command {
 	opts := &options{
-		io:        f.IO(),
-		baseRepo:  f.BaseRepo,
-		apiClient: f.ApiClient,
-		exec:      f.Executor(),
+		io:         f.IO(),
+		baseRepo:   f.BaseRepo,
+		apiClient:  f.ApiClient,
+		runCommand: runCommand,
 	}
 
 	cmd := &cobra.Command{
@@ -126,5 +130,15 @@ func (o *options) run(ctx context.Context) error {
 	}
 	args = append(args, o.initArgs...)
 
-	return o.exec.Exec(ctx, o.binary, args, nil)
+	return o.runCommand(o.io.StdOut, o.io.StdErr, o.binary, args)
+}
+
+func RunCommand(stdout, stderr io.Writer, binary string, args []string) error {
+	cmd := exec.Command(
+		binary,
+		args...,
+	)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	return cmd.Run()
 }

@@ -17,7 +17,6 @@ import (
 
 	"gitlab.com/gitlab-org/cli/cmd/gen-docs/urlwrapper"
 	"gitlab.com/gitlab-org/cli/internal/api"
-	"gitlab.com/gitlab-org/cli/internal/cmdutils"
 	"gitlab.com/gitlab-org/cli/internal/commands"
 	"gitlab.com/gitlab-org/cli/internal/config"
 	"gitlab.com/gitlab-org/cli/internal/glinstance"
@@ -234,7 +233,7 @@ func fatal(err error) {
 }
 
 // adapted from: github.com/spf13/cobra/blob/main/doc/md_docs.go
-// GenMarkdownTreeCustom is the same as GenMarkdownTree, but
+// GenMarkdownTreeCustom is the the same as GenMarkdownTree, but
 // with custom filePrepender and linkHandler.
 func GenMarkdownTreeCustom(cmd *cobra.Command, dir string) error {
 	for _, c := range cmd.Commands() {
@@ -482,8 +481,4 @@ func (f *factory) DefaultHostname() string {
 
 func (f *factory) BuildInfo() api.BuildInfo {
 	return api.BuildInfo{}
-}
-
-func (f *factory) Executor() cmdutils.Executor {
-	return nil
 }

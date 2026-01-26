@@ -45,49 +45,49 @@ func EnvKeyEquivalence(key string) []string {
 
 	switch key {
 	case "api_host":
+		keys := []string{"GITLAB_API_HOST"}
 		if ciAutologinEnabled {
-			return []string{"CI_SERVER_FQDN"}
+			keys = append(keys, "CI_SERVER_FQDN")
 		}
-
-		return []string{"GITLAB_API_HOST"}
+		return keys
 	case "api_protocol":
+		keys := []string{strings.ToUpper(key)}
 		if ciAutologinEnabled {
-			return []string{"CI_SERVER_PROTOCOL"}
+			keys = append(keys, "CI_SERVER_PROTOCOL")
 		}
-
-		return []string{strings.ToUpper(key)}
+		return keys
 	case "host":
+		keys := []string{"GITLAB_HOST", "GITLAB_URI", "GL_HOST"}
 		if ciAutologinEnabled {
-			return []string{"CI_SERVER_FQDN"}
+			keys = append(keys, "CI_SERVER_FQDN")
 		}
-
-		return []string{"GITLAB_HOST", "GITLAB_URI", "GL_HOST"}
+		return keys
 	case "token":
 		return []string{"GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN"}
 	case "job_token":
+		keys := []string{strings.ToUpper(key)}
 		if ciAutologinEnabled {
-			return []string{"CI_JOB_TOKEN"}
+			keys = append(keys, "CI_JOB_TOKEN")
 		}
-
-		return []string{strings.ToUpper(key)}
+		return keys
 	case "ca_cert":
+		keys := []string{strings.ToUpper(key)}
 		if ciAutologinEnabled {
-			return []string{"CI_SERVER_TLS_CA_FILE"}
+			keys = append(keys, "CI_SERVER_TLS_CA_FILE")
 		}
-
-		return []string{strings.ToUpper(key)}
+		return keys
 	case "client_cert":
+		keys := []string{strings.ToUpper(key)}
 		if ciAutologinEnabled {
-			return []string{"CI_SERVER_TLS_CERT_FILE"}
+			keys = append(keys, "CI_SERVER_TLS_CERT_FILE")
 		}
-
-		return []string{strings.ToUpper(key)}
+		return keys
 	case "client_key":
+		keys := []string{strings.ToUpper(key)}
 		if ciAutologinEnabled {
-			return []string{"CI_SERVER_TLS_KEY_FILE"}
+			keys = append(keys, "CI_SERVER_TLS_KEY_FILE")
 		}
-
-		return []string{strings.ToUpper(key)}
+		return keys
 	case "no_prompt":
 		return []string{"NO_PROMPT", "PROMPT_DISABLED"}
 	case "telemetry":

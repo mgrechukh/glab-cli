@@ -10,6 +10,8 @@ import (
 
 	"github.com/mattn/go-isatty"
 	"golang.org/x/term"
+
+	"gitlab.com/gitlab-org/cli/internal/execext"
 )
 
 // IsTerminal reports whether the file descriptor is connected to a terminal
@@ -44,7 +46,7 @@ func TerminalWidth(out io.Writer) int {
 	}
 
 	if isCygwinTerminal(out) {
-		tputExe, err := exec.LookPath("tput")
+		tputExe, err := execext.LookPath("tput")
 		if err != nil {
 			return defaultWidth
 		}

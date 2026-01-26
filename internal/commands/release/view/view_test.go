@@ -3,151 +3,97 @@
 package view
 
 import (
+	"net/http"
 	"regexp"
 	"testing"
-	"time"
 
 	"github.com/MakeNowJust/heredoc/v2"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
 
-	gitlab "gitlab.com/gitlab-org/api/client-go"
-	gitlabtesting "gitlab.com/gitlab-org/api/client-go/testing"
-
+	"gitlab.com/gitlab-org/cli/internal/glinstance"
 	"gitlab.com/gitlab-org/cli/internal/testing/cmdtest"
+	"gitlab.com/gitlab-org/cli/internal/testing/httpmock"
+	"gitlab.com/gitlab-org/cli/test"
 )
 
-func Test_ReleaseView(t *testing.T) {
-	type testCase struct {
-		name       string
-		cli        string
-		wantErr    bool
-		wantStderr string
-		setupMock  func(tc *gitlabtesting.TestClient)
+func runCommand(t *testing.T, rt http.RoundTripper, cli string) (*test.CmdOut, error) {
+	t.Helper()
+
+	ios, _, stdout, stderr := cmdtest.TestIOStreams()
+	factory := cmdtest.NewTestFactory(ios,
+		cmdtest.WithGitLabClient(cmdtest.NewTestApiClient(t, &http.Client{Transport: rt}, "", glinstance.DefaultHostname).Lab()),
+	)
+	cmd := NewCmdView(factory)
+	return cmdtest.ExecuteCommand(cmd, cli, stdout, stderr)
+}
+
+func TestReleaseView(t *testing.T) {
+	type httpMock struct {
+		method   string
+		path     string
+		status   int
+		bodyFile string
 	}
 
-	createdAt, _ := time.Parse(time.RFC3339, "2020-01-23T07:13:17.721Z")
-	releasedAt, _ := time.Parse(time.RFC3339, "2020-01-23T07:13:17.721Z")
-
-	testRelease := &gitlab.Release{
-		Name:            "test_release",
-		TagName:         "0.0.1",
-		Description:     "",
-		CreatedAt:       &createdAt,
-		ReleasedAt:      &releasedAt,
-		UpcomingRelease: false,
-		Author: gitlab.BasicUser{
-			ID:        11809982,
-			Username:  "test_user",
-			Name:      "Test User",
-			State:     "active",
-			AvatarURL: "https://gitlab.com/uploads/-/system/user/avatar/11809982/avatar.png",
-			WebURL:    "https://gitlab.com/test_user",
-		},
-		Commit: gitlab.Commit{
-			ID:             "26e80b26fd9f8515401a4d10c331904f034e9f05",
-			ShortID:        "26e80b26",
-			Title:          "Add new feature",
-			Message:        "Added a great new feature",
-			AuthorName:     "Test User",
-			AuthorEmail:    "test_user@gitlab.com",
-			CommitterName:  "test_user",
-			CommitterEmail: "test_user@gitlab.com",
-			WebURL:         "https://gitlab.com/OWNER/REPO/-/commit/26e80b26fd9f8515401a4d10c331904f034e9f05",
-		},
-		CommitPath: "/OWNER/REPO/-/commit/26e80b26fd9f8515401a4d10c331904f034e9f05",
-		TagPath:    "/OWNER/REPO/-/tags/0.0.1",
-		Assets: gitlab.ReleaseAssets{
-			Count: 2,
-			Sources: []gitlab.ReleaseAssetsSource{
-				{
-					Format: "zip",
-					URL:    "https://gitlab.com/OWNER/REPO/-/archive/0.0.1/REPO-0.0.1.zip",
-				},
-			},
-			Links: []*gitlab.ReleaseLink{
-				{
-					ID:             1294469,
-					Name:           "test asset",
-					URL:            "https://gitlab.com/some/location/1133",
-					DirectAssetURL: "https://gitlab.com/OWNER/REPO/-/releases/0.0.1/downloads/test_asset",
-					LinkType:       "other",
-				},
-			},
-		},
-		Links: gitlab.ReleaseLinks{
-			Self: "https://gitlab.com/OWNER/REPO/-/releases/0.0.1",
-		},
-	}
-
-	testCases := []testCase{
+	tests := []struct {
+		name     string
+		cli      string
+		httpMock httpMock
+	}{
 		{
 			name: "view release with specific tag",
 			cli:  "0.0.1",
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockReleases.EXPECT().
-					GetRelease("OWNER/REPO", "0.0.1", gomock.Any()).
-					Return(testRelease, nil, nil)
+			httpMock: httpMock{
+				http.MethodGet,
+				"/api/v4/projects/OWNER/REPO/releases/0.0.1",
+				http.StatusOK,
+				"testdata/release.json",
 			},
 		},
 		{
 			name: "view latest release",
 			cli:  "",
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockReleases.EXPECT().
-					ListReleases("OWNER/REPO", gomock.Any()).
-					Return([]*gitlab.Release{testRelease}, nil, nil)
+			httpMock: httpMock{
+				http.MethodGet,
+				"/api/v4/projects/OWNER/REPO/releases",
+				http.StatusOK,
+				"testdata/releases.json",
 			},
 		},
 	}
 
-	expectedOut := heredoc.Doc(`test_release
-		Test User released this about X years ago
-		26e80b26 - 0.0.1
-
-
-
-		ASSETS
-		test asset	https://gitlab.com/OWNER/REPO/-/releases/0.0.1/downloads/test_asset
-
-		SOURCES
-		https://gitlab.com/OWNER/REPO/-/archive/0.0.1/REPO-0.0.1.zip
-
-
-		View this release on GitLab at https://gitlab.com/OWNER/REPO/-/releases/0.0.1
-		`)
-
-	for _, tc := range testCases {
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// GIVEN
-			testClient := gitlabtesting.NewTestClient(t)
-			tc.setupMock(testClient)
-			exec := cmdtest.SetupCmdForTest(
-				t,
-				NewCmdView,
-				false,
-				cmdtest.WithGitLabClient(testClient.Client),
-			)
+			fakeHTTP := httpmock.New()
+			defer fakeHTTP.Verify(t)
 
-			// WHEN
-			out, err := exec(tc.cli)
+			fakeHTTP.RegisterResponder(tc.httpMock.method, tc.httpMock.path,
+				httpmock.NewFileResponse(tc.httpMock.status, tc.httpMock.bodyFile))
 
-			// THEN
-			if tc.wantErr {
-				require.Error(t, err)
-				assert.Equal(t, tc.wantStderr, err.Error())
-				return
-			}
-			require.NoError(t, err)
+			output, err := runCommand(t, fakeHTTP, tc.cli)
 
-			// Normalize the time in the output
-			outStr := out.String()
+			out := output.String()
 			timeRE := regexp.MustCompile(`\d+ years`)
-			outStr = timeRE.ReplaceAllString(outStr, "X years")
+			out = timeRE.ReplaceAllString(out, "X years")
 
-			assert.Equal(t, expectedOut, outStr)
-			assert.Empty(t, out.Stderr())
+			if assert.NoErrorf(t, err, "error running command `view %s`: %v", tc.cli, err) {
+				assert.Equal(t, heredoc.Doc(`test_release
+											Test User released this about X years ago
+											26e80b26 - 0.0.1
+
+
+
+											ASSETS
+											test asset	https://gitlab.com/OWNER/REPO/-/releases/0.0.1/downloads/test_asset
+
+											SOURCES
+											https://gitlab.com/OWNER/REPO/-/archive/0.0.1/REPO-0.0.1.zip
+
+
+											View this release on GitLab at https://gitlab.com/OWNER/REPO/-/releases/0.0.1
+											`), out)
+				assert.Empty(t, output.Stderr())
+			}
 		})
 	}
 }

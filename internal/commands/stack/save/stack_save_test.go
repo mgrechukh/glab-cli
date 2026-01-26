@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/MakeNowJust/heredoc/v2"
-	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
@@ -23,9 +22,9 @@ import (
 	git_testing "gitlab.com/gitlab-org/cli/internal/git/testing"
 	"gitlab.com/gitlab-org/cli/internal/run"
 	"gitlab.com/gitlab-org/cli/internal/testing/cmdtest"
+	"gitlab.com/gitlab-org/cli/test"
 )
 
-// setupTestFactory is used by prompt_test.go to test internal functions.
 func setupTestFactory(t *testing.T, rt http.RoundTripper, isTTY bool) (*bytes.Buffer, *bytes.Buffer, cmdutils.Factory) {
 	t.Helper()
 
@@ -36,6 +35,19 @@ func setupTestFactory(t *testing.T, rt http.RoundTripper, isTTY bool) (*bytes.Bu
 	)
 
 	return stdout, stderr, factory
+}
+
+func runSaveCommand(t *testing.T, rt http.RoundTripper, getText cmdutils.GetTextUsingEditor, isTTY bool, args string) (*test.CmdOut, error) {
+	t.Helper()
+
+	stdout, stderr, factory := setupTestFactory(t, rt, isTTY)
+
+	ctrl := gomock.NewController(t)
+	mockCmd := git_testing.NewMockGitRunner(ctrl)
+
+	cmd := NewCmdSaveStack(factory, mockCmd, getText)
+
+	return cmdtest.ExecuteCommand(cmd, args, stdout, stderr)
 }
 
 func TestSaveNewStack(t *testing.T) {
@@ -119,16 +131,7 @@ func TestSaveNewStack(t *testing.T) {
 			getText := getMockEditor(tc.editorMessage, &[]string{})
 			args := strings.Join(tc.args, " ")
 
-			ctrl := gomock.NewController(t)
-			mockCmd := git_testing.NewMockGitRunner(ctrl)
-
-			exec := cmdtest.SetupCmdForTest(t, func(f cmdutils.Factory) *cobra.Command {
-				return NewCmdSaveStack(f, mockCmd, getText)
-			}, isTTY,
-				cmdtest.WithGitLabClient(cmdtest.NewTestApiClient(t, nil, "", "gitlab.com").Lab()),
-			)
-
-			output, err := exec(args)
+			output, err := runSaveCommand(t, nil, getText, isTTY, args)
 
 			if tc.wantErr {
 				require.Errorf(t, err, tc.expected)

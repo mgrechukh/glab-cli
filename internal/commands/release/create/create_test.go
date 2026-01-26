@@ -5,8 +5,8 @@ package create
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -20,11 +20,25 @@ import (
 
 	"gitlab.com/gitlab-org/cli/internal/glinstance"
 	"gitlab.com/gitlab-org/cli/internal/testing/cmdtest"
+	"gitlab.com/gitlab-org/cli/internal/testing/httpmock"
+	"gitlab.com/gitlab-org/cli/test"
 )
 
-func TestReleaseCreate(t *testing.T) {
-	t.Setenv("CI_DEFAULT_BRANCH", "main")
+func runCommand(t *testing.T, rt http.RoundTripper, cli string) (*test.CmdOut, error) {
+	t.Helper()
 
+	ios, _, stdout, stderr := cmdtest.TestIOStreams()
+
+	factory := cmdtest.NewTestFactory(ios,
+		cmdtest.WithGitLabClient(cmdtest.NewTestApiClient(t, &http.Client{Transport: rt}, "", glinstance.DefaultHostname).Lab()),
+	)
+
+	cmd := NewCmdCreate(factory)
+
+	return cmdtest.ExecuteCommand(cmd, cli, stdout, stderr)
+}
+
+func TestReleaseCreate(t *testing.T) {
 	tests := []struct {
 		name string
 		cli  string
@@ -50,45 +64,44 @@ func TestReleaseCreate(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			testClient := gitlabtesting.NewTestClient(t)
+			fakeHTTP := &httpmock.Mocker{
+				MatchURL: httpmock.PathAndQuerystring,
+			}
+			defer fakeHTTP.Verify(t)
 
-			exec := cmdtest.SetupCmdForTest(
-				t,
-				NewCmdCreate,
-				false,
-				cmdtest.WithGitLabClient(testClient.Client),
-				cmdtest.WithBaseRepo("OWNER", "REPO", glinstance.DefaultHostname),
-			)
+			fakeHTTP.RegisterResponder(http.MethodGet, "/api/v4/projects/OWNER/REPO/releases/0%2E0%2E1",
+				httpmock.NewStringResponse(http.StatusNotFound, `{"message":"404 Not Found"}`))
 
-			notFoundResponse := &gitlab.Response{Response: &http.Response{StatusCode: http.StatusNotFound}}
+			fakeHTTP.RegisterResponder(http.MethodPost, "/api/v4/projects/OWNER/REPO/releases",
+				func(req *http.Request) (*http.Response, error) {
+					rb, _ := io.ReadAll(req.Body)
 
-			// Tag exists
-			testClient.MockTags.EXPECT().GetTag("OWNER/REPO", "0.0.1", gomock.Any()).Return(&gitlab.Tag{Name: "0.0.1"}, nil, nil)
+					assert.Contains(t, string(rb), `"tag_name":"0.0.1"`)
 
-			// Release doesn't exist
-			testClient.MockReleases.EXPECT().GetRelease("OWNER/REPO", "0.0.1", gomock.Any()).Return(nil, notFoundResponse, errors.New("not found"))
-
-			// Create release - verify options
-			testClient.MockReleases.EXPECT().CreateRelease("OWNER/REPO", gomock.Any()).
-				DoAndReturn(func(pid any, opts *gitlab.CreateReleaseOptions, options ...gitlab.RequestOptionFunc) (*gitlab.Release, *gitlab.Response, error) {
-					assert.Equal(t, "0.0.1", *opts.TagName)
 					if tc.expectedDescription != "" {
-						require.NotNil(t, opts.Description)
-						assert.Equal(t, tc.expectedDescription, *opts.Description)
+						assert.Contains(t, string(rb), `"description":"bugfix release"`)
 					}
 					if tc.expectedTagMessage != "" {
-						require.NotNil(t, opts.TagMessage)
-						assert.Equal(t, tc.expectedTagMessage, *opts.TagMessage)
+						assert.Contains(t, string(rb), `"tag_message":"tag message"`)
 					}
-					return &gitlab.Release{
-						Name:        "test_release",
-						TagName:     "0.0.1",
-						Description: "bugfix release",
-						Links:       gitlab.ReleaseLinks{Self: "https://gitlab.com/OWNER/REPO/-/releases/0.0.1"},
-					}, nil, nil
-				})
+					resp, _ := httpmock.NewStringResponse(http.StatusCreated,
+						`{
+							"name": "test_release",
+							"tag_name": "0.0.1",
+							"description": "bugfix release",
+							"created_at": "2023-01-19T02:58:32.622Z",
+							"released_at": "2023-01-19T02:58:32.622Z",
+							"upcoming_release": false,
+							"tag_path": "/OWNER/REPO/-/tags/0.0.1",
+							"_links": {
+								"self": "https://gitlab.com/OWNER/REPO/-/releases/0.0.1"
+							}
+						}`)(req)
+					return resp, nil
+				},
+			)
 
-			output, err := exec(tc.cli)
+			output, err := runCommand(t, fakeHTTP, tc.cli)
 
 			if assert.NoErrorf(t, err, "error running command `create %s`: %v", tc.cli, err) {
 				assert.Contains(t, output.String(), `• Validating tag 0.0.1
@@ -102,15 +115,13 @@ func TestReleaseCreate(t *testing.T) {
 }
 
 func TestReleaseCreateWithFiles(t *testing.T) {
-	// NOTE: This test cannot use t.Parallel() because it uses t.Setenv().
-	t.Setenv("CI_DEFAULT_BRANCH", "main")
-
 	tests := []struct {
 		name string
 		cli  string
 
 		wantType     bool
-		expectedType gitlab.LinkTypeValue
+		expectedType string
+		expectedOut  string
 	}{
 		{
 			name: "when a release is created and a file is uploaded using filename only",
@@ -123,76 +134,81 @@ func TestReleaseCreateWithFiles(t *testing.T) {
 			cli:  "0.0.1 testdata/test_file.txt#test_file#other",
 
 			wantType:     true,
-			expectedType: gitlab.OtherLinkType,
+			expectedType: `"link_type":"other"`,
 		},
 		{
 			name: "when a release is created and a filename is uploaded with a type",
 			cli:  "0.0.1 testdata/test_file.txt##package",
 
 			wantType:     true,
-			expectedType: gitlab.PackageLinkType,
+			expectedType: `"link_type":"package"`,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			testClient := gitlabtesting.NewTestClient(t, gitlab.WithBaseURL(glinstance.DefaultHostname))
+			fakeHTTP := &httpmock.Mocker{
+				MatchURL: httpmock.PathAndQuerystring,
+			}
+			defer fakeHTTP.Verify(t)
 
-			notFoundResponse := &gitlab.Response{Response: &http.Response{StatusCode: http.StatusNotFound}}
+			fakeHTTP.RegisterResponder(http.MethodGet, "/api/v4/projects/OWNER/REPO/releases/0%2E0%2E1",
+				httpmock.NewStringResponse(http.StatusNotFound, `{"message":"404 Not Found"}`))
 
-			// Tag exists
-			testClient.MockTags.EXPECT().GetTag("OWNER/REPO", "0.0.1", gomock.Any()).Return(&gitlab.Tag{Name: "0.0.1"}, nil, nil)
+			fakeHTTP.RegisterResponder(http.MethodPost, "/api/v4/projects/OWNER/REPO/releases",
+				func(req *http.Request) (*http.Response, error) {
+					rb, _ := io.ReadAll(req.Body)
 
-			// Release doesn't exist
-			testClient.MockReleases.EXPECT().GetRelease("OWNER/REPO", "0.0.1", gomock.Any()).Return(nil, notFoundResponse, errors.New("not found"))
+					assert.Contains(t, string(rb), `"tag_name":"0.0.1"`)
 
-			// Create release
-			testClient.MockReleases.EXPECT().CreateRelease("OWNER/REPO", gomock.Any()).
-				DoAndReturn(func(pid any, opts *gitlab.CreateReleaseOptions, options ...gitlab.RequestOptionFunc) (*gitlab.Release, *gitlab.Response, error) {
-					assert.Equal(t, "0.0.1", *opts.TagName)
-					return &gitlab.Release{
-						Name:    "test_release",
-						TagName: "0.0.1",
-						Links:   gitlab.ReleaseLinks{Self: "https://gitlab.com/OWNER/REPO/-/releases/0.0.1"},
-					}, nil, nil
-				})
-
-			// Mock UploadProjectMarkdown for file upload
-			testClient.MockProjectMarkdownUploads.EXPECT().
-				UploadProjectMarkdown("OWNER/REPO", gomock.Any(), "test_file.txt", gomock.Any()).
-				Return(&gitlab.MarkdownUploadedFile{
-					Alt:      "test_file",
-					URL:      "/uploads/66dbcd21ec5d24ed6ea225176098d52b/test_file.txt",
-					FullPath: "/namespace1/project1/uploads/66dbcd21ec5d24ed6ea225176098d52b/test_file.txt",
-					Markdown: "![test_file](/uploads/66dbcd21ec5d24ed6ea225176098d52b/test_file.txt)",
-				}, nil, nil)
-
-			// Mock CreateReleaseLink and verify link_type
-			testClient.MockReleaseLinks.EXPECT().
-				CreateReleaseLink("OWNER/REPO", "0.0.1", gomock.Any()).
-				DoAndReturn(func(pid any, tagName string, opts *gitlab.CreateReleaseLinkOptions, options ...gitlab.RequestOptionFunc) (*gitlab.ReleaseLink, *gitlab.Response, error) {
-					if tc.wantType {
-						require.NotNil(t, opts.LinkType)
-						assert.Equal(t, tc.expectedType, *opts.LinkType)
-					} else {
-						assert.Nil(t, opts.LinkType)
-					}
-
-					return &gitlab.ReleaseLink{
-						ID:             2,
-						Name:           "test_file.txt",
-						URL:            "https://gitlab.example.com/mynamespace/hello/-/jobs/688/artifacts/raw/testdata/test_file.txt",
-						DirectAssetURL: "https://gitlab.example.com/mynamespace/hello/-/releases/0.0.1/downloads/testdata/test_file.txt",
-						LinkType:       gitlab.OtherLinkType,
-					}, nil, nil
-				})
-
-			exec := cmdtest.SetupCmdForTest(t, NewCmdCreate, false,
-				cmdtest.WithGitLabClient(testClient.Client),
-				cmdtest.WithBaseRepo("OWNER", "REPO", ""),
+					resp, _ := httpmock.NewStringResponse(http.StatusCreated,
+						`{
+							"name": "test_release",
+							"tag_name": "0.0.1",
+							"description": null,
+							"created_at": "2023-01-19T02:58:32.622Z",
+							"released_at": "2023-01-19T02:58:32.622Z",
+							"upcoming_release": false,
+							"tag_path": "/OWNER/REPO/-/tags/0.0.1",
+							"_links": {
+								"self": "https://gitlab.com/OWNER/REPO/-/releases/0.0.1"
+							}
+						}`)(req)
+					return resp, nil
+				},
 			)
 
-			output, err := exec(tc.cli)
+			fakeHTTP.RegisterResponder(http.MethodPost, "/api/v4/projects/OWNER/REPO/uploads",
+				httpmock.NewStringResponse(http.StatusCreated,
+					`{
+							  "alt": "test_file",
+							  "url": "/uploads/66dbcd21ec5d24ed6ea225176098d52b/testdata/test_file.txt",
+							  "full_path": "/namespace1/project1/uploads/66dbcd21ec5d24ed6ea225176098d52b/testdata/test_file.txt",
+							  "markdown": "![test_file](/uploads/66dbcd21ec5d24ed6ea225176098d52b/testdata/test_file.txt)"
+							}`))
+
+			fakeHTTP.RegisterResponder(http.MethodPost, "/api/v4/projects/OWNER/REPO/releases/0%2E0%2E1/assets/links",
+				func(req *http.Request) (*http.Response, error) {
+					rb, _ := io.ReadAll(req.Body)
+
+					if tc.wantType {
+						assert.Contains(t, string(rb), tc.expectedType)
+					} else {
+						assert.NotContains(t, string(rb), "link_type")
+					}
+
+					resp, _ := httpmock.NewStringResponse(http.StatusCreated, `{
+						"id":2,
+						"name":"test_file.txt",
+						"url":"https://gitlab.example.com/mynamespace/hello/-/jobs/688/artifacts/raw/testdata/test_file.txt",
+						"direct_asset_url":"https://gitlab.example.com/mynamespace/hello/-/releases/0.0.1/downloads/testdata/test_file.txt",
+						"link_type":"other"
+						}`)(req)
+					return resp, nil
+				},
+			)
+
+			output, err := runCommand(t, fakeHTTP, tc.cli)
 
 			if assert.NoErrorf(t, err, "error running command `create %s`: %v", tc.cli, err) {
 				assert.Contains(t, output.String(), `• Validating tag 0.0.1
@@ -208,9 +224,6 @@ func TestReleaseCreateWithFiles(t *testing.T) {
 }
 
 func TestReleaseCreate_WithAssetsLinksJSON(t *testing.T) {
-	// NOTE: This test cannot use t.Parallel() because it uses t.Setenv().
-	t.Setenv("CI_DEFAULT_BRANCH", "main")
-
 	tests := []struct {
 		name           string
 		cli            string
@@ -241,49 +254,60 @@ func TestReleaseCreate_WithAssetsLinksJSON(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			testClient := gitlabtesting.NewTestClient(t, gitlab.WithBaseURL(glinstance.DefaultHostname))
+			fakeHTTP := &httpmock.Mocker{
+				MatchURL: httpmock.PathAndQuerystring,
+			}
+			defer fakeHTTP.Verify(t)
 
-			notFoundResponse := &gitlab.Response{Response: &http.Response{StatusCode: http.StatusNotFound}}
+			fakeHTTP.RegisterResponder(http.MethodGet, "/api/v4/projects/OWNER/REPO/releases/0%2E0%2E1",
+				httpmock.NewStringResponse(http.StatusNotFound, `{"message":"404 Not Found"}`))
 
-			// Tag exists
-			testClient.MockTags.EXPECT().GetTag("OWNER/REPO", "0.0.1", gomock.Any()).Return(&gitlab.Tag{Name: "0.0.1"}, nil, nil)
+			fakeHTTP.RegisterResponder(http.MethodPost, "/api/v4/projects/OWNER/REPO/releases",
+				func(req *http.Request) (*http.Response, error) {
+					rb, _ := io.ReadAll(req.Body)
 
-			// Release doesn't exist
-			testClient.MockReleases.EXPECT().GetRelease("OWNER/REPO", "0.0.1", gomock.Any()).Return(nil, notFoundResponse, errors.New("not found"))
+					assert.NotContains(t, string(rb), `"direct_asset_path":`)
+					assert.NotContains(t, string(rb), `"filepath":`)
 
-			// Create release
-			testClient.MockReleases.EXPECT().CreateRelease("OWNER/REPO", gomock.Any()).
-				DoAndReturn(func(pid any, opts *gitlab.CreateReleaseOptions, options ...gitlab.RequestOptionFunc) (*gitlab.Release, *gitlab.Response, error) {
-					return &gitlab.Release{
-						Name:    "test_release",
-						TagName: "0.0.1",
-						Links:   gitlab.ReleaseLinks{Self: "https://gitlab.com/OWNER/REPO/-/releases/0.0.1"},
-					}, nil, nil
-				})
-
-			// Mock CreateReleaseLink and verify the parameters
-			testClient.MockReleaseLinks.EXPECT().
-				CreateReleaseLink("OWNER/REPO", "0.0.1", gomock.Any()).
-				DoAndReturn(func(pid any, tagName string, opts *gitlab.CreateReleaseLinkOptions, options ...gitlab.RequestOptionFunc) (*gitlab.ReleaseLink, *gitlab.Response, error) {
-					// Verify direct_asset_path is set
-					assert.NotNil(t, opts.DirectAssetPath)
-					assert.Equal(t, "/any-path", *opts.DirectAssetPath)
-
-					return &gitlab.ReleaseLink{
-						ID:             1,
-						Name:           "any-name",
-						URL:            "https://example.com/any-asset-url",
-						DirectAssetURL: "https://gitlab.example.com/OWNER/REPO/releases/0.0.1/downloads/any-path",
-						LinkType:       gitlab.OtherLinkType,
-					}, nil, nil
-				})
-
-			exec := cmdtest.SetupCmdForTest(t, NewCmdCreate, false,
-				cmdtest.WithGitLabClient(testClient.Client),
-				cmdtest.WithBaseRepo("OWNER", "REPO", ""),
+					resp, _ := httpmock.NewStringResponse(http.StatusCreated, `
+						{
+							"name": "test_release",
+							"tag_name": "0.0.1",
+							"description": null,
+							"created_at": "2023-01-19T02:58:32.622Z",
+							"released_at": "2023-01-19T02:58:32.622Z",
+							"upcoming_release": false,
+							"tag_path": "/OWNER/REPO/-/tags/0.0.1",
+							"_links": {
+								"self": "https://gitlab.com/OWNER/REPO/-/releases/0.0.1"
+							}
+						}
+					`)(req)
+					return resp, nil
+				},
 			)
 
-			output, err := exec(tt.cli)
+			fakeHTTP.RegisterResponder(http.MethodPost, "/api/v4/projects/OWNER/REPO/releases/0%2E0%2E1/assets/links",
+				func(req *http.Request) (*http.Response, error) {
+					rb, _ := io.ReadAll(req.Body)
+
+					assert.Contains(t, string(rb), `"direct_asset_path":"/any-path"`)
+					assert.NotContains(t, string(rb), `"filepath":`)
+
+					resp, _ := httpmock.NewStringResponse(http.StatusCreated, `
+						{
+							"id":1,
+							"name":"any-name",
+							"url":"https://example.com/any-asset-url",
+							"direct_asset_url":"https://gitlab.example.com/OWNER/REPO/releases/0.0.1/downloads/any-path",
+							"link_type":"other"
+						}
+					`)(req)
+					return resp, nil
+				},
+			)
+
+			output, err := runCommand(t, fakeHTTP, tt.cli)
 
 			if assert.NoErrorf(t, err, "error running command `create %s`: %v", tt.cli, err) {
 				assert.Contains(t, output.String(), tt.expectedOutput)
@@ -294,9 +318,6 @@ func TestReleaseCreate_WithAssetsLinksJSON(t *testing.T) {
 }
 
 func TestReleaseCreateWithPublishToCatalog(t *testing.T) {
-	// This test uses httptest.NewServer because the catalog publish API uses raw HTTP
-	// via client.Do() rather than a GitLab client-go service interface.
-
 	tests := []struct {
 		name string
 		cli  string
@@ -355,68 +376,50 @@ func TestReleaseCreateWithPublishToCatalog(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// Create a test server that handles both release APIs and catalog publish
-			testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch {
-				case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/OWNER/REPO/repository/tags/0.0.1":
-					// Tag exists
-					w.WriteHeader(http.StatusOK)
-					_, _ = w.Write([]byte(`{"name": "0.0.1"}`))
+			fakeHTTP := &httpmock.Mocker{
+				MatchURL: httpmock.PathAndQuerystring,
+			}
+			defer fakeHTTP.Verify(t)
 
-				case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/OWNER/REPO/releases/0.0.1":
-					w.WriteHeader(http.StatusNotFound)
-					_, _ = w.Write([]byte(`{"message":"404 Not Found"}`))
+			fakeHTTP.RegisterResponder(http.MethodGet, "/api/v4/projects/OWNER/REPO/releases/0%2E0%2E1",
+				httpmock.NewStringResponse(http.StatusNotFound, `{"message":"404 Not Found"}`))
 
-				case r.Method == http.MethodPost && r.URL.Path == "/api/v4/projects/OWNER/REPO/releases":
-					w.WriteHeader(http.StatusCreated)
-					_, _ = w.Write([]byte(`{
-						"name": "test_release",
-						"tag_name": "0.0.1",
-						"description": "bugfix release",
-						"created_at": "2023-01-19T02:58:32.622Z",
-						"released_at": "2023-01-19T02:58:32.622Z",
-						"upcoming_release": false,
-						"tag_path": "/OWNER/REPO/-/tags/0.0.1",
-						"_links": {
-							"self": "https://gitlab.com/OWNER/REPO/-/releases/0.0.1"
-						}
-					}`))
-
-				case r.Method == http.MethodPost && r.URL.Path == "/api/v4/projects/OWNER/REPO/catalog/publish":
-					if tc.wantBody != "" {
-						var reqBody, expectedBody map[string]any
-						err := json.NewDecoder(r.Body).Decode(&reqBody)
-						require.NoError(t, err)
-						err = json.Unmarshal([]byte(tc.wantBody), &expectedBody)
-						require.NoError(t, err)
-
-						reqBodyJSON, _ := json.Marshal(reqBody)
-						expectedBodyJSON, _ := json.Marshal(expectedBody)
-						assert.JSONEq(t, string(expectedBodyJSON), string(reqBodyJSON))
-					}
-
-					w.WriteHeader(http.StatusOK)
-					_, _ = w.Write([]byte(`{
-						"catalog_url": "https://gitlab.example.com/explore/catalog/my-namespace/my-component-project"
-					}`))
-
-				default:
-					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-					w.WriteHeader(http.StatusNotFound)
-				}
-			}))
-			defer testServer.Close()
-
-			// Create a GitLab client with the test server's URL
-			gitlabClient, err := gitlab.NewClient("test-token", gitlab.WithBaseURL(testServer.URL+"/api/v4"))
-			require.NoError(t, err)
-
-			exec := cmdtest.SetupCmdForTest(t, NewCmdCreate, false,
-				cmdtest.WithGitLabClient(gitlabClient),
-				cmdtest.WithBaseRepo("OWNER", "REPO", ""),
+			fakeHTTP.RegisterResponder(http.MethodPost, "/api/v4/projects/OWNER/REPO/releases",
+				func(req *http.Request) (*http.Response, error) {
+					resp, _ := httpmock.NewStringResponse(http.StatusCreated,
+						`{
+							"name": "test_release",
+							"tag_name": "0.0.1",
+							"description": "bugfix release",
+							"created_at": "2023-01-19T02:58:32.622Z",
+							"released_at": "2023-01-19T02:58:32.622Z",
+							"upcoming_release": false,
+							"tag_path": "/OWNER/REPO/-/tags/0.0.1",
+							"_links": {
+								"self": "https://gitlab.com/OWNER/REPO/-/releases/0.0.1"
+							}
+						}`)(req)
+					return resp, nil
+				},
 			)
 
-			output, err := exec(tc.cli)
+			if tc.wantBody != "" {
+				fakeHTTP.RegisterResponder(http.MethodPost, "/api/v4/projects/OWNER/REPO/catalog/publish",
+					func(req *http.Request) (*http.Response, error) {
+						body, _ := io.ReadAll(req.Body)
+
+						assert.JSONEq(t, tc.wantBody, string(body))
+
+						response := httpmock.NewJSONResponse(http.StatusOK, map[string]any{
+							"catalog_url": "https://gitlab.example.com/explore/catalog/my-namespace/my-component-project",
+						})
+
+						return response(req)
+					},
+				)
+			}
+
+			output, err := runCommand(t, fakeHTTP, tc.cli)
 
 			if tc.wantErr {
 				assert.Error(t, err)
@@ -430,157 +433,143 @@ func TestReleaseCreateWithPublishToCatalog(t *testing.T) {
 }
 
 func TestReleaseCreate_NoUpdate(t *testing.T) {
-	t.Setenv("CI_DEFAULT_BRANCH", "main")
+	tests := []struct {
+		name    string
+		cli     string
+		exists  bool
+		wantErr bool
+	}{
+		{
+			name:    "when release doesn't exist with --no-update flag",
+			cli:     "0.0.1 --no-update",
+			exists:  false,
+			wantErr: false,
+		},
+		{
+			name:    "when release exists with --no-update flag",
+			cli:     "0.0.1 --no-update",
+			exists:  true,
+			wantErr: true,
+		},
+	}
 
-	t.Run("when release doesn't exist with --no-update flag", func(t *testing.T) {
-		tc := gitlabtesting.NewTestClient(t)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeHTTP := &httpmock.Mocker{
+				MatchURL: httpmock.PathAndQuerystring,
+			}
+			defer fakeHTTP.Verify(t)
 
-		exec := cmdtest.SetupCmdForTest(
-			t,
-			NewCmdCreate,
-			false,
-			cmdtest.WithGitLabClient(tc.Client),
-			cmdtest.WithBaseRepo("OWNER", "REPO", glinstance.DefaultHostname),
-		)
+			if tc.exists {
+				fakeHTTP.RegisterResponder(http.MethodGet, "/api/v4/projects/OWNER/REPO/releases/0%2E0%2E1",
+					httpmock.NewStringResponse(http.StatusOK, `{
+						"name": "test_release",
+						"tag_name": "0.0.1"
+					}`))
+			} else {
+				fakeHTTP.RegisterResponder(http.MethodGet, "/api/v4/projects/OWNER/REPO/releases/0%2E0%2E1",
+					httpmock.NewStringResponse(http.StatusNotFound, `{"message":"404 Not Found"}`))
 
-		notFoundResponse := &gitlab.Response{Response: &http.Response{StatusCode: http.StatusNotFound}}
+				fakeHTTP.RegisterResponder(http.MethodPost, "/api/v4/projects/OWNER/REPO/releases",
+					httpmock.NewStringResponse(http.StatusCreated, `{
+						"name": "test_release",
+						"tag_name": "0.0.1"
+					}`))
+			}
 
-		// Tag exists, so no need to get default branch
-		tc.MockTags.EXPECT().GetTag("OWNER/REPO", "0.0.1", gomock.Any()).Return(&gitlab.Tag{Name: "0.0.1"}, nil, nil)
-		tc.MockReleases.EXPECT().GetRelease("OWNER/REPO", "0.0.1", gomock.Any()).Return(nil, notFoundResponse, errors.New("not found"))
-		tc.MockReleases.EXPECT().CreateRelease("OWNER/REPO", gomock.Any()).Return(&gitlab.Release{
-			Name:    "test_release",
-			TagName: "0.0.1",
-			Links:   gitlab.ReleaseLinks{Self: "https://gitlab.com/OWNER/REPO/-/releases/0.0.1"},
-		}, nil, nil)
+			output, err := runCommand(t, fakeHTTP, tc.cli)
 
-		output, err := exec("0.0.1 --no-update")
-		require.NoError(t, err)
-		assert.Contains(t, output.String(), "Release created:")
-	})
-
-	t.Run("when release exists with --no-update flag", func(t *testing.T) {
-		tc := gitlabtesting.NewTestClient(t)
-
-		exec := cmdtest.SetupCmdForTest(
-			t,
-			NewCmdCreate,
-			false,
-			cmdtest.WithGitLabClient(tc.Client),
-			cmdtest.WithBaseRepo("OWNER", "REPO", glinstance.DefaultHostname),
-		)
-
-		okResponse := &gitlab.Response{Response: &http.Response{StatusCode: http.StatusOK}}
-
-		// Tag exists
-		tc.MockTags.EXPECT().GetTag("OWNER/REPO", "0.0.1", gomock.Any()).Return(&gitlab.Tag{Name: "0.0.1"}, nil, nil)
-		// Release exists
-		tc.MockReleases.EXPECT().GetRelease("OWNER/REPO", "0.0.1", gomock.Any()).Return(&gitlab.Release{
-			Name:    "test_release",
-			TagName: "0.0.1",
-			Links:   gitlab.ReleaseLinks{Self: "https://gitlab.com/OWNER/REPO/-/releases/0.0.1"},
-		}, okResponse, nil)
-
-		_, err := exec("0.0.1 --no-update")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "release for tag \"0.0.1\" already exists and --no-update flag was specified")
-	})
+			if tc.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "release for tag \"0.0.1\" already exists and --no-update flag was specified")
+			} else {
+				assert.NoError(t, err)
+				assert.Contains(t, output.String(), "Release created:")
+			}
+		})
+	}
 }
 
 func TestReleaseCreate_MilestoneClosing(t *testing.T) {
-	t.Setenv("CI_DEFAULT_BRANCH", "main")
+	tests := []struct {
+		name           string
+		cli            string
+		extraHttpStubs func(*httpmock.Mocker)
+		wantOutput     string
+		wantErr        bool
+	}{
+		{
+			name: "successfully closes milestone after release",
+			cli:  "0.0.1 --milestone 'v1.0'",
+			extraHttpStubs: func(fakeHTTP *httpmock.Mocker) {
+				fakeHTTP.RegisterResponder(http.MethodGet, "/api/v4/projects/OWNER/REPO/milestones?title=v1.0",
+					httpmock.NewStringResponse(http.StatusOK, `[{
+						"id": 1,
+						"iid": 1,
+						"title": "v1.0",
+						"state": "active"
+					}]`))
 
-	t.Run("successfully closes milestone after release", func(t *testing.T) {
-		testClient := gitlabtesting.NewTestClient(t)
-
-		exec := cmdtest.SetupCmdForTest(
-			t,
-			NewCmdCreate,
-			false,
-			cmdtest.WithGitLabClient(testClient.Client),
-			cmdtest.WithBaseRepo("OWNER", "REPO", glinstance.DefaultHostname),
-		)
-
-		notFoundResponse := &gitlab.Response{Response: &http.Response{StatusCode: http.StatusNotFound}}
-
-		// Tag exists
-		testClient.MockTags.EXPECT().GetTag("OWNER/REPO", "0.0.1", gomock.Any()).Return(&gitlab.Tag{Name: "0.0.1"}, nil, nil)
-
-		// Release doesn't exist
-		testClient.MockReleases.EXPECT().GetRelease("OWNER/REPO", "0.0.1", gomock.Any()).Return(nil, notFoundResponse, errors.New("not found"))
-
-		// Create release
-		testClient.MockReleases.EXPECT().CreateRelease("OWNER/REPO", gomock.Any()).Return(&gitlab.Release{
-			Name:        "0.0.1",
-			TagName:     "0.0.1",
-			Description: "Release with milestone",
-			Links:       gitlab.ReleaseLinks{Self: "https://gitlab.com/OWNER/REPO/-/releases/0.0.1"},
-		}, nil, nil)
-
-		// List milestones to find the one to close
-		testClient.MockMilestones.EXPECT().ListMilestones("OWNER/REPO", gomock.Any()).Return([]*gitlab.Milestone{
-			{
-				ID:    1,
-				IID:   1,
-				Title: "v1.0",
-				State: "active",
+				fakeHTTP.RegisterResponder(http.MethodPut, "/api/v4/projects/OWNER/REPO/milestones/1",
+					httpmock.NewStringResponse(http.StatusOK, `{
+						"id": 1,
+						"iid": 1,
+						"title": "v1.0",
+						"state": "closed"
+					}`))
 			},
-		}, nil, nil)
-
-		// Update milestone to closed state
-		testClient.MockMilestones.EXPECT().UpdateMilestone("OWNER/REPO", int64(1), gomock.Any()).Return(&gitlab.Milestone{
-			ID:    1,
-			IID:   1,
-			Title: "v1.0",
-			State: "closed",
-		}, nil, nil)
-
-		output, err := exec("0.0.1 --milestone 'v1.0'")
-
-		require.NoError(t, err)
-		assert.Contains(t, output.String(), `• Validating tag 0.0.1
+			wantOutput: `• Validating tag 0.0.1
 • Creating or updating release repo=OWNER/REPO tag=0.0.1
 ✓ Release created:	url=https://gitlab.com/OWNER/REPO/-/releases/0.0.1
-✓ Closed milestone "v1.0"`)
-	})
-
-	t.Run("skips milestone closing when --no-close-milestone is set", func(t *testing.T) {
-		testClient := gitlabtesting.NewTestClient(t)
-
-		exec := cmdtest.SetupCmdForTest(
-			t,
-			NewCmdCreate,
-			false,
-			cmdtest.WithGitLabClient(testClient.Client),
-			cmdtest.WithBaseRepo("OWNER", "REPO", glinstance.DefaultHostname),
-		)
-
-		notFoundResponse := &gitlab.Response{Response: &http.Response{StatusCode: http.StatusNotFound}}
-
-		// Tag exists
-		testClient.MockTags.EXPECT().GetTag("OWNER/REPO", "0.0.1", gomock.Any()).Return(&gitlab.Tag{Name: "0.0.1"}, nil, nil)
-
-		// Release doesn't exist
-		testClient.MockReleases.EXPECT().GetRelease("OWNER/REPO", "0.0.1", gomock.Any()).Return(nil, notFoundResponse, errors.New("not found"))
-
-		// Create release
-		testClient.MockReleases.EXPECT().CreateRelease("OWNER/REPO", gomock.Any()).Return(&gitlab.Release{
-			Name:        "0.0.1",
-			TagName:     "0.0.1",
-			Description: "Release with milestone",
-			Links:       gitlab.ReleaseLinks{Self: "https://gitlab.com/OWNER/REPO/-/releases/0.0.1"},
-		}, nil, nil)
-
-		// No milestone API calls expected when --no-close-milestone is set
-
-		output, err := exec("0.0.1 --milestone 'v1.0' --no-close-milestone")
-
-		require.NoError(t, err)
-		assert.Contains(t, output.String(), `• Validating tag 0.0.1
+✓ Closed milestone "v1.0"`,
+			wantErr: false,
+		},
+		{
+			name:           "skips milestone closing when --no-close-milestone is set",
+			cli:            "0.0.1 --milestone 'v1.0' --no-close-milestone",
+			extraHttpStubs: nil,
+			wantOutput: `• Validating tag 0.0.1
 • Creating or updating release repo=OWNER/REPO tag=0.0.1
 ✓ Release created:	url=https://gitlab.com/OWNER/REPO/-/releases/0.0.1
-✓ Skipping closing milestones`)
-	})
+✓ Skipping closing milestones`,
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeHTTP := &httpmock.Mocker{
+				MatchURL: httpmock.PathAndQuerystring,
+			}
+			defer fakeHTTP.Verify(t)
+
+			fakeHTTP.RegisterResponder(http.MethodGet, "/api/v4/projects/OWNER/REPO/releases/0%2E0%2E1",
+				httpmock.NewStringResponse(http.StatusNotFound, `{"message":"404 Not Found"}`))
+
+			fakeHTTP.RegisterResponder(http.MethodPost, "/api/v4/projects/OWNER/REPO/releases",
+				httpmock.NewStringResponse(http.StatusCreated, `{
+					"name": "0.0.1",
+					"tag_name": "0.0.1",
+					"description": "Release with milestone",
+					"_links": {
+						"self": "https://gitlab.com/OWNER/REPO/-/releases/0.0.1"
+					}
+				}`))
+
+			if tt.extraHttpStubs != nil {
+				tt.extraHttpStubs(fakeHTTP)
+			}
+
+			output, err := runCommand(t, fakeHTTP, tt.cli)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Contains(t, output.String(), tt.wantOutput)
+			}
+		})
+	}
 }
 
 func TestReleaseCreate_DefaultBranchDetectionForRef(t *testing.T) {
@@ -665,30 +654,28 @@ func TestReleaseCreate_DefaultBranchDetectionForRef(t *testing.T) {
 }
 
 func TestReleaseCreate_ExperimentalNotes(t *testing.T) {
-	t.Setenv("CI_DEFAULT_BRANCH", "main")
-
 	tests := []struct {
 		name                string
 		cli                 string
 		files               map[string]string
 		wantErr             bool
 		errMsg              string
-		setupMocks          bool
+		setupHTTPStubs      bool
 		expectedDescription string
 	}{
 		{
-			name:       "when experimental notes is used with notes flag",
-			cli:        `0.0.1 --experimental-notes-text-or-file "test.md" --notes "test"`,
-			wantErr:    true,
-			errMsg:     "if any flags in the group [experimental-notes-text-or-file notes] are set none of the others can be; [experimental-notes-text-or-file notes] were all set",
-			setupMocks: false,
+			name:           "when experimental notes is used with notes flag",
+			cli:            `0.0.1 --experimental-notes-text-or-file "test.md" --notes "test"`,
+			wantErr:        true,
+			errMsg:         "if any flags in the group [experimental-notes-text-or-file notes] are set none of the others can be; [experimental-notes-text-or-file notes] were all set",
+			setupHTTPStubs: false,
 		},
 		{
-			name:       "when experimental notes is used with notes-file flag",
-			cli:        `0.0.1 --experimental-notes-text-or-file "test.md" --notes-file "other.md"`,
-			wantErr:    true,
-			errMsg:     "if any flags in the group [experimental-notes-text-or-file notes-file] are set none of the others can be; [experimental-notes-text-or-file notes-file] were all set",
-			setupMocks: false,
+			name:           "when experimental notes is used with notes-file flag",
+			cli:            `0.0.1 --experimental-notes-text-or-file "test.md" --notes-file "other.md"`,
+			wantErr:        true,
+			errMsg:         "if any flags in the group [experimental-notes-text-or-file notes-file] are set none of the others can be; [experimental-notes-text-or-file notes-file] were all set",
+			setupHTTPStubs: false,
 		},
 		{
 			name: "when experimental notes points to existing file",
@@ -696,25 +683,25 @@ func TestReleaseCreate_ExperimentalNotes(t *testing.T) {
 			files: map[string]string{
 				"test.md": "# Test Release\nThis is a test release.",
 			},
-			setupMocks:          true,
+			setupHTTPStubs:      true,
 			expectedDescription: "# Test Release\nThis is a test release.",
 		},
 		{
 			name:                "when experimental notes has non-existent file and falls back to text",
 			cli:                 `0.0.1 --experimental-notes-text-or-file "This is plain text"`,
-			setupMocks:          true,
+			setupHTTPStubs:      true,
 			expectedDescription: "This is plain text",
 		},
 		{
 			name:                "when experimental notes contains spaces, treats as text",
 			cli:                 `0.0.1 --experimental-notes-text-or-file "This contains spaces.md"`,
-			setupMocks:          true,
+			setupHTTPStubs:      true,
 			expectedDescription: "This contains spaces.md",
 		},
 		{
 			name:                "when experimental notes has leading/trailing spaces",
 			cli:                 `0.0.1 --experimental-notes-text-or-file " notes.md "`,
-			setupMocks:          true,
+			setupHTTPStubs:      true,
 			expectedDescription: " notes.md ",
 		},
 	}
@@ -728,38 +715,35 @@ func TestReleaseCreate_ExperimentalNotes(t *testing.T) {
 				require.NoError(t, err)
 			}
 
-			testClient := gitlabtesting.NewTestClient(t)
+			fakeHTTP := &httpmock.Mocker{
+				MatchURL: httpmock.PathAndQuerystring,
+			}
+			defer fakeHTTP.Verify(t)
 
-			if tt.setupMocks {
-				notFoundResponse := &gitlab.Response{Response: &http.Response{StatusCode: http.StatusNotFound}}
+			if tt.setupHTTPStubs {
+				fakeHTTP.RegisterResponder(http.MethodGet, "/api/v4/projects/OWNER/REPO/releases/0%2E0%2E1",
+					httpmock.NewStringResponse(http.StatusNotFound, `{"message":"404 Not Found"}`))
 
-				// Tag exists
-				testClient.MockTags.EXPECT().GetTag("OWNER/REPO", "0.0.1", gomock.Any()).Return(&gitlab.Tag{Name: "0.0.1"}, nil, nil)
+				fakeHTTP.RegisterResponder(http.MethodPost, "/api/v4/projects/OWNER/REPO/releases",
+					func(req *http.Request) (*http.Response, error) {
+						var reqBody map[string]any
+						err := json.NewDecoder(req.Body).Decode(&reqBody)
+						require.NoError(t, err)
 
-				// Release doesn't exist
-				testClient.MockReleases.EXPECT().GetRelease("OWNER/REPO", "0.0.1", gomock.Any()).Return(nil, notFoundResponse, errors.New("not found"))
+						assert.Equal(t, tt.expectedDescription, reqBody["description"])
 
-				// Create release and verify description
-				testClient.MockReleases.EXPECT().CreateRelease("OWNER/REPO", gomock.Any()).
-					DoAndReturn(func(pid any, opts *gitlab.CreateReleaseOptions, options ...gitlab.RequestOptionFunc) (*gitlab.Release, *gitlab.Response, error) {
-						if tt.expectedDescription != "" {
-							require.NotNil(t, opts.Description)
-							assert.Equal(t, tt.expectedDescription, *opts.Description)
-						}
-						return &gitlab.Release{
-							Name:    "test_release",
-							TagName: "0.0.1",
-							Links:   gitlab.ReleaseLinks{Self: "https://gitlab.com/OWNER/REPO/-/releases/0.0.1"},
-						}, nil, nil
+						resp, _ := httpmock.NewStringResponse(http.StatusCreated, `{
+							"name": "test_release",
+							"tag_name": "0.0.1",
+							"_links": {
+								"self": "https://gitlab.com/OWNER/REPO/-/releases/0.0.1"
+							}
+						}`)(req)
+						return resp, nil
 					})
 			}
 
-			exec := cmdtest.SetupCmdForTest(t, NewCmdCreate, false,
-				cmdtest.WithGitLabClient(testClient.Client),
-				cmdtest.WithBaseRepo("OWNER", "REPO", ""),
-			)
-
-			output, err := exec(tt.cli)
+			output, err := runCommand(t, fakeHTTP, tt.cli)
 
 			if tt.wantErr {
 				require.Error(t, err)

@@ -3,84 +3,99 @@
 package list
 
 import (
+	"fmt"
+	"net/http"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
 
-	gitlab "gitlab.com/gitlab-org/api/client-go"
-	gitlabtesting "gitlab.com/gitlab-org/api/client-go/testing"
-
+	"gitlab.com/gitlab-org/cli/internal/glinstance"
 	"gitlab.com/gitlab-org/cli/internal/testing/cmdtest"
+	"gitlab.com/gitlab-org/cli/internal/testing/httpmock"
+	"gitlab.com/gitlab-org/cli/test"
 )
 
+func runCommand(t *testing.T, rt http.RoundTripper) (*test.CmdOut, error) {
+	t.Helper()
+
+	ios, _, stdout, stderr := cmdtest.TestIOStreams()
+	factory := cmdtest.NewTestFactory(ios,
+		cmdtest.WithGitLabClient(cmdtest.NewTestApiClient(t, &http.Client{Transport: rt}, "", glinstance.DefaultHostname).Lab()),
+	)
+	cmd := NewCmdList(factory)
+	return cmdtest.ExecuteCommand(cmd, "", stdout, stderr)
+}
+
 func TestDeployKeyList(t *testing.T) {
-	type testCase struct {
+	type httpMock struct {
+		method string
+		path   string
+		status int
+		body   string
+	}
+	keyResponse := `[
+  {
+    "id": 1,
+    "title": "example key",
+    "key": "ssh-ed25519 example",
+    "fingerprint": "1a:2b:3c:4d:5e:6f:7g:8h:9i:0j:kl:mn:op:qr:st:uv:wx:yz:1a:",
+    "fingerprint_sha256": "SHA256:example",
+    "created_at": "2025-01-01T00:00:00Z",
+    "expires_at": null,
+    "can_push": false
+  }]`
+
+	repoName := "OWNER%2FREPO"
+	pagination := "?page=1&per_page=30"
+	apiEndpoint := fmt.Sprintf("/api/v4/projects/%s/deploy_keys%s", repoName, pagination)
+
+	tests := []struct {
 		name        string
-		cli         string
+		httpMock    []httpMock
 		expectedOut string
-		wantErr     bool
-		wantStderr  string
-		setupMock   func(tc *gitlabtesting.TestClient)
-	}
-
-	testKey := &gitlab.ProjectDeployKey{
-		ID:        1,
-		Title:     "example key",
-		Key:       "ssh-ed25519 example",
-		CanPush:   false,
-		CreatedAt: gitlab.Ptr(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)),
-	}
-
-	testCases := []testCase{
+	}{
 		{
-			name:        "when no deploy keys are found shows an empty list",
-			cli:         "",
+			name: "when no deploy keys are found shows an empty list",
+			httpMock: []httpMock{{
+				http.MethodGet,
+				apiEndpoint,
+				http.StatusOK,
+				"[]",
+			}},
 			expectedOut: "\n",
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockDeployKeys.EXPECT().
-					ListProjectDeployKeys("OWNER/REPO", gomock.Any()).
-					Return([]*gitlab.ProjectDeployKey{}, nil, nil)
-			},
 		},
 		{
-			name:        "when deploy keys are found shows a list of keys",
-			cli:         "",
+			name: "when deploy keys are found shows a list of keys",
+			httpMock: []httpMock{{
+				http.MethodGet,
+				apiEndpoint,
+				http.StatusOK,
+				keyResponse,
+			}},
 			expectedOut: "Title\tKey\tCan Push\tCreated At\nexample key\tssh-ed25519 example\tfalse\t2025-01-01 00:00:00 +0000 UTC\n\n",
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockDeployKeys.EXPECT().
-					ListProjectDeployKeys("OWNER/REPO", gomock.Any()).
-					Return([]*gitlab.ProjectDeployKey{testKey}, nil, nil)
-			},
 		},
 	}
 
-	for _, tc := range testCases {
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// GIVEN
-			testClient := gitlabtesting.NewTestClient(t)
-			tc.setupMock(testClient)
-			exec := cmdtest.SetupCmdForTest(
-				t,
-				NewCmdList,
-				false,
-				cmdtest.WithGitLabClient(testClient.Client),
-			)
-
-			// WHEN
-			out, err := exec(tc.cli)
-
-			// THEN
-			if tc.wantErr {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.wantStderr)
-				return
+			fakeHTTP := &httpmock.Mocker{
+				MatchURL: httpmock.PathAndQuerystring,
 			}
-			require.NoError(t, err)
-			assert.Equal(t, tc.expectedOut, out.OutBuf.String())
-			assert.Empty(t, out.ErrBuf.String())
+			defer fakeHTTP.Verify(t)
+
+			for _, mock := range tc.httpMock {
+				fakeHTTP.RegisterResponder(mock.method, mock.path,
+					httpmock.NewStringResponse(mock.status, mock.body))
+			}
+
+			output, err := runCommand(t, fakeHTTP)
+
+			if assert.NoErrorf(t, err, "error running command `deploy-key list %s`: %v", err) {
+				out := output.String()
+
+				assert.Equal(t, tc.expectedOut, out)
+				assert.Empty(t, output.Stderr())
+			}
 		})
 	}
 }

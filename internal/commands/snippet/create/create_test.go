@@ -3,52 +3,72 @@
 package create
 
 import (
-	"fmt"
+	"errors"
 	"net/http"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
 
-	gitlab "gitlab.com/gitlab-org/api/client-go"
-	gitlabtesting "gitlab.com/gitlab-org/api/client-go/testing"
-
+	"gitlab.com/gitlab-org/cli/internal/glinstance"
 	"gitlab.com/gitlab-org/cli/internal/testing/cmdtest"
+	"gitlab.com/gitlab-org/cli/internal/testing/httpmock"
+	"gitlab.com/gitlab-org/cli/test"
 )
 
 func TestSnippetCreate(t *testing.T) {
-	type testCase struct {
-		name       string
-		command    string
-		wantErr    string
-		wantStderr []string
-		wantStdout []string
-		setupMock  func(tc *gitlabtesting.TestClient)
+	type httpMock struct {
+		method string
+		path   string
+		status int
+		body   string
 	}
 
-	testCases := []testCase{
+	httpPersonal := `{
+    "id": 1,
+    "title": "This is a snippet",
+    "description": "Hello World snippet",
+    "web_url": "https://gitlab.example.com/-/snippets/1",
+    "file_name": "snippet.txt",
+    "files": [
+      {
+        "path": "snippet.txt",
+        "raw_url": "https://gitlab.example.com/-/snippets/1/raw/main/snippet.txt"
+      }
+    ]
+  }`
+
+	httpProject := `{
+  "id": 1,
+  "title": "This is a snippet",
+  "description": "Hello World snippet",
+  "web_url": "https://gitlab.example.com/OWNER/REPO/-/snippets/1",
+  "file_name": "snippet.txt",
+  "files": [
+    {
+      "path": "snippet.txt",
+      "raw_url": "https://gitlab.example.com/-/OWNER/REPO/snippets/1/raw/main/snippet.txt"
+    }
+  ]
+}`
+
+	testCases := []struct {
+		name       string
+		command    string
+		wantErr    error
+		wantStderr []string
+		wantStdout []string
+		mock       httpMock
+	}{
 		{
 			name:       "Create personal snippet",
 			command:    "testdata/snippet.txt --personal -d 'Hello World snippet' -f 'snippet.txt' -t 'This is a snippet'",
 			wantStderr: []string{"- Creating snippet in personal space"},
 			wantStdout: []string{"https://gitlab.example.com/-/snippets/1"},
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockSnippets.EXPECT().
-					CreateSnippet(gomock.Any()).
-					Return(&gitlab.Snippet{
-						ID:          1,
-						Title:       "This is a snippet",
-						Description: "Hello World snippet",
-						WebURL:      "https://gitlab.example.com/-/snippets/1",
-						FileName:    "snippet.txt",
-						Files: []gitlab.SnippetFile{
-							{
-								Path:   "snippet.txt",
-								RawURL: "https://gitlab.example.com/-/snippets/1/raw/main/snippet.txt",
-							},
-						},
-					}, nil, nil)
+			mock: httpMock{
+				method: http.MethodPost,
+				path:   "/api/v4/snippets",
+				status: http.StatusCreated,
+				body:   httpPersonal,
 			},
 		},
 		{
@@ -56,22 +76,11 @@ func TestSnippetCreate(t *testing.T) {
 			command:    "testdata/snippet.txt -d 'Hello World snippet' -f 'snippet.txt' -t 'This is a snippet'",
 			wantStderr: []string{"- Creating snippet in OWNER/REPO"},
 			wantStdout: []string{"https://gitlab.example.com/OWNER/REPO/-/snippets/1"},
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockProjectSnippets.EXPECT().
-					CreateSnippet("OWNER/REPO", gomock.Any()).
-					Return(&gitlab.Snippet{
-						ID:          1,
-						Title:       "This is a snippet",
-						Description: "Hello World snippet",
-						WebURL:      "https://gitlab.example.com/OWNER/REPO/-/snippets/1",
-						FileName:    "snippet.txt",
-						Files: []gitlab.SnippetFile{
-							{
-								Path:   "snippet.txt",
-								RawURL: "https://gitlab.example.com/-/OWNER/REPO/snippets/1/raw/main/snippet.txt",
-							},
-						},
-					}, nil, nil)
+			mock: httpMock{
+				method: http.MethodPost,
+				path:   "/api/v4/projects/OWNER/REPO/snippets",
+				status: http.StatusCreated,
+				body:   httpProject,
 			},
 		},
 
@@ -80,22 +89,11 @@ func TestSnippetCreate(t *testing.T) {
 			command:    "testdata/snippet.txt -d 'Hello World snippet' -t 'This is a snippet'",
 			wantStderr: []string{"- Creating snippet in OWNER/REPO"},
 			wantStdout: []string{"https://gitlab.example.com/OWNER/REPO/-/snippets/1"},
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockProjectSnippets.EXPECT().
-					CreateSnippet("OWNER/REPO", gomock.Any()).
-					Return(&gitlab.Snippet{
-						ID:          1,
-						Title:       "This is a snippet",
-						Description: "Hello World snippet",
-						WebURL:      "https://gitlab.example.com/OWNER/REPO/-/snippets/1",
-						FileName:    "snippet.txt",
-						Files: []gitlab.SnippetFile{
-							{
-								Path:   "snippet.txt",
-								RawURL: "https://gitlab.example.com/-/OWNER/REPO/snippets/1/raw/main/snippet.txt",
-							},
-						},
-					}, nil, nil)
+			mock: httpMock{
+				method: http.MethodPost,
+				path:   "/api/v4/projects/OWNER/REPO/snippets",
+				status: http.StatusCreated,
+				body:   httpProject,
 			},
 		},
 
@@ -104,95 +102,83 @@ func TestSnippetCreate(t *testing.T) {
 			command:    "-d 'Hello World snippet' -t 'This is a snippet' testdata/file1.md testdata/file2.md",
 			wantStderr: []string{"- Creating snippet in OWNER/REPO"},
 			wantStdout: []string{"https://gitlab.example.com/OWNER/REPO/-/snippets/1"},
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockProjectSnippets.EXPECT().
-					CreateSnippet("OWNER/REPO", gomock.Any()).
-					Return(&gitlab.Snippet{
-						ID:          1,
-						Title:       "This is a snippet",
-						Description: "Hello World snippet",
-						WebURL:      "https://gitlab.example.com/OWNER/REPO/-/snippets/1",
-						FileName:    "snippet.txt",
-						Files: []gitlab.SnippetFile{
-							{
-								Path:   "snippet.txt",
-								RawURL: "https://gitlab.example.com/-/OWNER/REPO/snippets/1/raw/main/snippet.txt",
-							},
-						},
-					}, nil, nil)
+			mock: httpMock{
+				method: http.MethodPost,
+				path:   "/api/v4/projects/OWNER/REPO/snippets",
+				status: http.StatusCreated,
+				body:   httpProject,
 			},
 		},
 		{
 			name:    "Create snippet 403 failure",
 			command: "testdata/snippet.txt -d 'Hello World snippet' -f 'snippet.txt' -t 'This is a snippet'",
-			wantErr: "failed to create snippet: 403 Forbidden",
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				forbiddenResponse := &gitlab.Response{Response: &http.Response{StatusCode: http.StatusForbidden}}
-				tc.MockProjectSnippets.EXPECT().
-					CreateSnippet("OWNER/REPO", gomock.Any()).
-					Return(nil, forbiddenResponse, fmt.Errorf("403 Forbidden"))
+			wantErr: errors.New("failed to create snippet: POST https://gitlab.com/api/v4/projects/OWNER%2FREPO/snippets: 403"),
+			mock: httpMock{
+				method: http.MethodPost,
+				path:   "/api/v4/projects/OWNER/REPO/snippets",
+				status: http.StatusForbidden,
+				body:   "",
 			},
 		},
 		{
 			name:    "Create personal snippet 403 failure",
 			command: "testdata/snippet.txt --personal -d 'Hello World snippet' -f 'snippet.txt' -t 'This is a personal snippet'",
-			wantErr: "failed to create snippet: 403 Forbidden",
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				forbiddenResponse := &gitlab.Response{Response: &http.Response{StatusCode: http.StatusForbidden}}
-				tc.MockSnippets.EXPECT().
-					CreateSnippet(gomock.Any()).
-					Return(nil, forbiddenResponse, fmt.Errorf("403 Forbidden"))
+			wantErr: errors.New("failed to create snippet: POST https://gitlab.com/api/v4/snippets: 403"),
+			mock: httpMock{
+				method: http.MethodPost,
+				path:   "/api/v4/snippets",
+				status: http.StatusForbidden,
+				body:   "",
 			},
 		},
 		{
 			name:    "Create snippet no stdin failure",
 			command: "-d 'Hello World snippet' -f 'snippet.txt' -t 'This is a personal snippet'",
-			wantErr: "stdin required if no 'path' is provided",
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				// No mock needed - fails before API call
-			},
+			wantErr: errors.New("stdin required if no 'path' is provided"),
 		},
 		{
 			name:    "Create snippet no path failure",
 			command: "-d 'Hello World snippet' -t 'This is a personal snippet'",
-			wantErr: "if 'path' is not provided, 'filename' and stdin are required",
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				// No mock needed - fails before API call
-			},
+			wantErr: errors.New("if 'path' is not provided, 'filename' and stdin are required"),
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// GIVEN
-			testClient := gitlabtesting.NewTestClient(t)
-			tc.setupMock(testClient)
-
-			exec := cmdtest.SetupCmdForTest(
-				t,
-				NewCmdCreate,
-				false,
-				cmdtest.WithGitLabClient(testClient.Client),
-			)
-
-			// WHEN
-			out, err := exec(tc.command)
-
-			// THEN
-			if tc.wantErr != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.wantErr)
-				return
+			fakeHTTP := &httpmock.Mocker{
+				MatchURL: httpmock.PathOnly,
 			}
-			require.NoError(t, err)
+			defer fakeHTTP.Verify(t)
+
+			if tc.mock.method != "" || tc.mock.path != "" {
+				fakeHTTP.RegisterResponder(tc.mock.method, tc.mock.path, httpmock.NewStringResponse(tc.mock.status, tc.mock.body))
+			}
+
+			out, err := runCommand(t, fakeHTTP, tc.command)
+			if tc.wantErr != nil {
+				require.EqualError(t, err, tc.wantErr.Error())
+			} else {
+				require.NoError(t, err)
+			}
 
 			for _, msg := range tc.wantStdout {
-				assert.Contains(t, out.String(), msg)
+				require.Contains(t, out.String(), msg)
 			}
 
 			for _, msg := range tc.wantStderr {
-				assert.Contains(t, out.Stderr(), msg)
+				require.Contains(t, out.Stderr(), msg)
 			}
 		})
 	}
+}
+
+func runCommand(t *testing.T, rt http.RoundTripper, cli string) (*test.CmdOut, error) {
+	t.Helper()
+
+	ios, _, stdout, stderr := cmdtest.TestIOStreams()
+	factory := cmdtest.NewTestFactory(ios,
+		cmdtest.WithGitLabClient(cmdtest.NewTestApiClient(t, &http.Client{Transport: rt}, "", glinstance.DefaultHostname).Lab()),
+	)
+	cmd := NewCmdCreate(factory)
+	return cmdtest.ExecuteCommand(cmd, cli, stdout, stderr)
 }

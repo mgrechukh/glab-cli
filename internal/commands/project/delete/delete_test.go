@@ -7,83 +7,93 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
-	gitlab "gitlab.com/gitlab-org/api/client-go"
-	gitlabtesting "gitlab.com/gitlab-org/api/client-go/testing"
-
-	"gitlab.com/gitlab-org/cli/internal/api"
 	"gitlab.com/gitlab-org/cli/internal/glinstance"
 	"gitlab.com/gitlab-org/cli/internal/testing/cmdtest"
+	"gitlab.com/gitlab-org/cli/internal/testing/httpmock"
+	"gitlab.com/gitlab-org/cli/test"
 )
 
-func Test_ProjectDelete(t *testing.T) {
-	type testCase struct {
-		name           string
-		cli            string
+func runCommand(t *testing.T, rt http.RoundTripper, cli string) (*test.CmdOut, error) {
+	t.Helper()
+
+	ios, _, stdout, stderr := cmdtest.TestIOStreams(cmdtest.WithTestIOStreamsAsTTY(true))
+
+	factory := cmdtest.NewTestFactory(ios,
+		cmdtest.WithApiClient(cmdtest.NewTestApiClient(t, &http.Client{Transport: rt}, "", glinstance.DefaultHostname)),
+	)
+
+	cmd := NewCmdDelete(factory)
+
+	return cmdtest.ExecuteCommand(cmd, cli, stdout, stderr)
+}
+
+func TestProjectDelete(t *testing.T) {
+	type httpMock struct {
+		method string
+		path   string
+		status int
+		body   string
+	}
+
+	tests := []struct {
+		name     string
+		cli      string
+		httpMock httpMock
+
 		expectedOutput string
-		wantErr        bool
-		wantStderr     string
-		setupMock      func(tc *gitlabtesting.TestClient)
-	}
-
-	testCases := []testCase{
+	}{
 		{
-			name:           "delete my project",
-			cli:            "--yes",
+			name: "delete my project",
+			cli:  "--yes",
+			httpMock: httpMock{
+				http.MethodDelete,
+				"/api/v4/projects/OWNER/REPO",
+				http.StatusAccepted,
+				`{"message":"202 Accepted"}`,
+			},
 			expectedOutput: "- Deleting project OWNER/REPO\n",
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockProjects.EXPECT().
-					DeleteProject("OWNER/REPO", nil).
-					Return(&gitlab.Response{Response: &http.Response{StatusCode: http.StatusAccepted}}, nil)
-			},
 		},
 		{
-			name:           "delete project",
-			cli:            "foo/bar --yes",
+			name: "delete project",
+			cli:  "foo/bar --yes",
+			httpMock: httpMock{
+				http.MethodDelete,
+				"/api/v4/projects/foo/bar",
+				http.StatusAccepted,
+				`{"message":"202 Accepted"}`,
+			},
 			expectedOutput: "- Deleting project foo/bar\n",
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockProjects.EXPECT().
-					DeleteProject("foo/bar", nil).
-					Return(&gitlab.Response{Response: &http.Response{StatusCode: http.StatusAccepted}}, nil)
-			},
 		},
 		{
-			name:           "delete group's project",
-			cli:            "group/foo/bar --yes",
-			expectedOutput: "- Deleting project group/foo/bar\n",
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockProjects.EXPECT().
-					DeleteProject("group/foo/bar", nil).
-					Return(&gitlab.Response{Response: &http.Response{StatusCode: http.StatusAccepted}}, nil)
+			name: "delete group's project",
+			cli:  "group/foo/bar --yes",
+			httpMock: httpMock{
+				http.MethodDelete,
+				"/api/v4/projects/group/foo/bar",
+				http.StatusAccepted,
+				`{"message":"202 Accepted"}`,
 			},
+			expectedOutput: "- Deleting project group/foo/bar\n",
 		},
 	}
 
-	for _, tc := range testCases {
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// GIVEN
-			testClient := gitlabtesting.NewTestClient(t)
-			tc.setupMock(testClient)
-			exec := cmdtest.SetupCmdForTest(
-				t,
-				NewCmdDelete,
-				true,
-				cmdtest.WithApiClient(cmdtest.NewTestApiClient(t, nil, "", glinstance.DefaultHostname, api.WithGitLabClient(testClient.Client))),
-			)
-
-			// WHEN
-			out, err := exec(tc.cli)
-
-			// THEN
-			if tc.wantErr {
-				require.Error(t, err)
-				assert.Equal(t, tc.wantStderr, err.Error())
-				return
+			fakeHTTP := &httpmock.Mocker{
+				MatchURL: httpmock.PathAndQuerystring,
 			}
-			require.NoError(t, err)
-			assert.Equal(t, tc.expectedOutput, out.Stderr())
-			assert.Empty(t, out.String())
+			defer fakeHTTP.Verify(t)
+
+			fakeHTTP.RegisterResponder(tc.httpMock.method, tc.httpMock.path,
+				httpmock.NewStringResponse(tc.httpMock.status, tc.httpMock.body))
+
+			output, err := runCommand(t, fakeHTTP, tc.cli)
+
+			if assert.NoErrorf(t, err, "error running command `project delete %s`: %v", tc.cli, err) {
+				assert.Equal(t, tc.expectedOutput, output.Stderr())
+				assert.Empty(t, output.String())
+			}
 		})
 	}
 }

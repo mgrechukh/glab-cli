@@ -4,192 +4,176 @@ package close
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/MakeNowJust/heredoc/v2"
-	"github.com/spf13/cobra"
+	"github.com/google/shlex"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
 
-	gitlab "gitlab.com/gitlab-org/api/client-go"
-	gitlabtesting "gitlab.com/gitlab-org/api/client-go/testing"
-
-	"gitlab.com/gitlab-org/cli/internal/cmdutils"
 	"gitlab.com/gitlab-org/cli/internal/commands/issuable"
 	"gitlab.com/gitlab-org/cli/internal/testing/cmdtest"
+	"gitlab.com/gitlab-org/cli/internal/testing/httpmock"
+	"gitlab.com/gitlab-org/cli/test"
 )
 
-func Test_IssuableClose(t *testing.T) {
-	type testCase struct {
-		name       string
+func mockAllResponses(t *testing.T, fakeHTTP *httpmock.Mocker) {
+	t.Helper()
+
+	fakeHTTP.RegisterResponder(http.MethodGet, "/projects/OWNER/REPO/issues/1",
+		httpmock.NewStringResponse(http.StatusOK, `{
+			"id": 1,
+			"iid": 1,
+			"title": "test issue",
+			"state": "opened",
+			"issue_type": "issue",
+			"created_at": "2023-04-05T10:51:26.371Z"
+		}`),
+	)
+
+	fakeHTTP.RegisterResponder(http.MethodPut, "/projects/OWNER/REPO/issues/1",
+		func(req *http.Request) (*http.Response, error) {
+			rb, _ := io.ReadAll(req.Body)
+
+			assert.Contains(t, string(rb), `"state_event":"close"`)
+			resp, _ := httpmock.NewStringResponse(http.StatusOK, `{
+				"id": 1,
+				"iid": 1,
+				"state": "closed",
+				"issue_type": "issue",
+				"created_at": "2023-04-05T10:51:26.371Z"
+			}`)(req)
+
+			return resp, nil
+		},
+	)
+
+	fakeHTTP.RegisterResponder(http.MethodGet, "/projects/OWNER/REPO/issues/2",
+		httpmock.NewStringResponse(http.StatusOK, `{
+			"id": 2,
+			"iid": 2,
+			"title": "test incident",
+			"state": "opened",
+			"issue_type": "incident",
+			"created_at": "2023-04-05T10:51:26.371Z"
+		}`),
+	)
+
+	fakeHTTP.RegisterResponder(http.MethodPut, "/projects/OWNER/REPO/issues/2",
+		func(req *http.Request) (*http.Response, error) {
+			rb, _ := io.ReadAll(req.Body)
+
+			assert.Contains(t, string(rb), `"state_event":"close"`)
+			resp, _ := httpmock.NewStringResponse(http.StatusOK, `{
+				"id": 2,
+				"iid": 2,
+				"state": "closed",
+				"issue_type": "incident",
+				"created_at": "2023-04-05T10:51:26.371Z"
+			}`)(req)
+
+			return resp, nil
+		},
+	)
+
+	fakeHTTP.RegisterResponder(http.MethodGet, "/projects/OWNER/REPO/issues/404",
+		httpmock.NewStringResponse(http.StatusNotFound, `{"message": "404 Not Found"}`),
+	)
+}
+
+func runCommand(t *testing.T, rt http.RoundTripper, issuableID string, issueType issuable.IssueType) (*test.CmdOut, error) {
+	t.Helper()
+
+	ios, _, stdout, stderr := cmdtest.TestIOStreams()
+
+	factory := cmdtest.NewTestFactory(ios,
+		cmdtest.WithGitLabClient(cmdtest.NewTestApiClient(t, &http.Client{Transport: rt}, "", "").Lab()),
+		cmdtest.WithBaseRepo("OWNER", "REPO", ""),
+	)
+
+	cmd := NewCmdClose(factory, issueType)
+
+	argv, err := shlex.Split(issuableID)
+	if err != nil {
+		return nil, err
+	}
+	cmd.SetArgs(argv)
+
+	_, err = cmd.ExecuteC()
+	return &test.CmdOut{
+		OutBuf: stdout,
+		ErrBuf: stderr,
+	}, err
+}
+
+func TestIssuableClose(t *testing.T) {
+	tests := []struct {
 		iid        int
+		name       string
 		issueType  issuable.IssueType
 		wantOutput string
 		wantErr    bool
-		setupMock  func(tc *gitlabtesting.TestClient)
-	}
-
-	createdAt, _ := time.Parse(time.RFC3339, "2023-04-05T10:51:26.371Z")
-
-	testCases := []testCase{
+	}{
 		{
-			name:      "issue_close",
 			iid:       1,
+			name:      "issue_close",
 			issueType: issuable.TypeIssue,
 			wantOutput: heredoc.Doc(`
 				- Closing issue...
 				✓ Closed issue #1
 
 				`),
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockIssues.EXPECT().
-					GetIssue("OWNER/REPO", int64(1), gomock.Any()).
-					Return(&gitlab.Issue{
-						ID:        1,
-						IID:       1,
-						Title:     "test issue",
-						State:     "opened",
-						IssueType: gitlab.Ptr("issue"),
-						CreatedAt: &createdAt,
-					}, nil, nil)
-				tc.MockIssues.EXPECT().
-					UpdateIssue("OWNER/REPO", int64(1), gomock.Any(), gomock.Any()).
-					Return(&gitlab.Issue{
-						ID:        1,
-						IID:       1,
-						State:     "closed",
-						IssueType: gitlab.Ptr("issue"),
-						CreatedAt: &createdAt,
-					}, nil, nil)
-			},
 		},
 		{
-			name:      "incident_close",
 			iid:       2,
+			name:      "incident_close",
 			issueType: issuable.TypeIncident,
 			wantOutput: heredoc.Doc(`
 				- Resolving incident...
 				✓ Resolved incident #2
 
 				`),
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockIssues.EXPECT().
-					GetIssue("OWNER/REPO", int64(2), gomock.Any()).
-					Return(&gitlab.Issue{
-						ID:        2,
-						IID:       2,
-						Title:     "test incident",
-						State:     "opened",
-						IssueType: gitlab.Ptr("incident"),
-						CreatedAt: &createdAt,
-					}, nil, nil)
-				tc.MockIssues.EXPECT().
-					UpdateIssue("OWNER/REPO", int64(2), gomock.Any(), gomock.Any()).
-					Return(&gitlab.Issue{
-						ID:        2,
-						IID:       2,
-						State:     "closed",
-						IssueType: gitlab.Ptr("incident"),
-						CreatedAt: &createdAt,
-					}, nil, nil)
-			},
 		},
 		{
-			name:      "incident_close_using_issue_command",
 			iid:       2,
+			name:      "incident_close_using_issue_command",
 			issueType: issuable.TypeIssue,
 			wantOutput: heredoc.Doc(`
 				- Closing issue...
 				✓ Closed issue #2
 
 				`),
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockIssues.EXPECT().
-					GetIssue("OWNER/REPO", int64(2), gomock.Any()).
-					Return(&gitlab.Issue{
-						ID:        2,
-						IID:       2,
-						Title:     "test incident",
-						State:     "opened",
-						IssueType: gitlab.Ptr("incident"),
-						CreatedAt: &createdAt,
-					}, nil, nil)
-				tc.MockIssues.EXPECT().
-					UpdateIssue("OWNER/REPO", int64(2), gomock.Any(), gomock.Any()).
-					Return(&gitlab.Issue{
-						ID:        2,
-						IID:       2,
-						State:     "closed",
-						IssueType: gitlab.Ptr("incident"),
-						CreatedAt: &createdAt,
-					}, nil, nil)
-			},
 		},
 		{
-			name:       "issue_close_using_incident_command",
 			iid:        1,
+			name:       "issue_close_using_incident_command",
 			issueType:  issuable.TypeIncident,
 			wantOutput: "Incident not found, but an issue with the provided ID exists. Run `glab issue close <id>` to close.\n",
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockIssues.EXPECT().
-					GetIssue("OWNER/REPO", int64(1), gomock.Any()).
-					Return(&gitlab.Issue{
-						ID:        1,
-						IID:       1,
-						Title:     "test issue",
-						State:     "opened",
-						IssueType: gitlab.Ptr("issue"),
-						CreatedAt: &createdAt,
-					}, nil, nil)
-			},
 		},
 		{
-			name:       "issue_not_found",
 			iid:        404,
+			name:       "issue_not_found",
 			issueType:  issuable.TypeIssue,
 			wantOutput: "404 Not Found",
 			wantErr:    true,
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				notFoundResponse := &gitlab.Response{Response: &http.Response{StatusCode: http.StatusNotFound}}
-				tc.MockIssues.EXPECT().
-					GetIssue("OWNER/REPO", int64(404), gomock.Any()).
-					Return(nil, notFoundResponse, fmt.Errorf("404 Not Found"))
-			},
 		},
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			// GIVEN
-			testClient := gitlabtesting.NewTestClient(t)
-			tc.setupMock(testClient)
+	for _, tt := range tests {
+		fakeHTTP := httpmock.New()
 
-			cmdFunc := func(f cmdutils.Factory) *cobra.Command {
-				return NewCmdClose(f, tc.issueType)
+		mockAllResponses(t, fakeHTTP)
+
+		t.Run(tt.name, func(t *testing.T) {
+			output, err := runCommand(t, fakeHTTP, fmt.Sprint(tt.iid), tt.issueType)
+			if tt.wantErr {
+				assert.Contains(t, err.Error(), tt.wantOutput)
+			} else {
+				assert.NoErrorf(t, err, "error running command `issue close %d`", tt.iid)
+				assert.Equal(t, tt.wantOutput, output.String())
+				assert.Empty(t, output.Stderr())
 			}
-
-			exec := cmdtest.SetupCmdForTest(
-				t,
-				cmdFunc,
-				false,
-				cmdtest.WithGitLabClient(testClient.Client),
-			)
-
-			// WHEN
-			out, err := exec(fmt.Sprint(tc.iid))
-
-			// THEN
-			if tc.wantErr {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.wantOutput)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tc.wantOutput, out.String())
-			assert.Empty(t, out.Stderr())
 		})
 	}
 }

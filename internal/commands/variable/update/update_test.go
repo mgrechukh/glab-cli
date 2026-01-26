@@ -4,19 +4,17 @@ package update
 
 import (
 	"bytes"
+	"net/http"
 	"testing"
 
 	"github.com/google/shlex"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
-
-	gitlab "gitlab.com/gitlab-org/api/client-go"
-	gitlabtesting "gitlab.com/gitlab-org/api/client-go/testing"
 
 	"gitlab.com/gitlab-org/cli/internal/api"
+	"gitlab.com/gitlab-org/cli/internal/glinstance"
 	"gitlab.com/gitlab-org/cli/internal/glrepo"
 	"gitlab.com/gitlab-org/cli/internal/testing/cmdtest"
+	"gitlab.com/gitlab-org/cli/internal/testing/httpmock"
 )
 
 func Test_NewCmdUpdate(t *testing.T) {
@@ -180,26 +178,29 @@ func Test_NewCmdUpdate(t *testing.T) {
 }
 
 func Test_updateRun_project(t *testing.T) {
-	// GIVEN
-	testClient := gitlabtesting.NewTestClient(t)
-	testClient.MockProjectVariables.EXPECT().
-		UpdateVariable("owner/repo", "TEST_VARIABLE", gomock.Any()).
-		Return(&gitlab.ProjectVariable{
-			Key:          "TEST_VARIABLE",
-			Value:        "foo",
-			VariableType: "env_var",
-			Protected:    false,
-			Masked:       false,
-		}, nil, nil)
+	reg := &httpmock.Mocker{}
+	defer reg.Verify(t)
+
+	reg.RegisterResponder(http.MethodPut, "/projects/owner/repo/variables/TEST_VARIABLE",
+		httpmock.NewStringResponse(http.StatusCreated, `
+			{
+    			"key": "TEST_VARIABLE",
+    			"value": "foo",
+    			"variable_type": "env_var",
+    			"protected": false,
+    			"masked": false
+			}
+		`),
+	)
 
 	io, _, stdout, _ := cmdtest.TestIOStreams()
 
 	opts := &options{
 		apiClient: func(repoHost string) (*api.Client, error) {
-			return cmdtest.NewTestApiClient(t, nil, "", "gitlab.com", api.WithGitLabClient(testClient.Client)), nil
+			return cmdtest.NewTestApiClient(t, &http.Client{Transport: reg}, "", "gitlab.com"), nil
 		},
 		baseRepo: func() (glrepo.Interface, error) {
-			return glrepo.New("owner", "repo", "gitlab.com"), nil
+			return glrepo.FromFullName("owner/repo", glinstance.DefaultHostname)
 		},
 		io:    io,
 		key:   "TEST_VARIABLE",
@@ -207,35 +208,35 @@ func Test_updateRun_project(t *testing.T) {
 		scope: "*",
 	}
 
-	// WHEN
 	err := opts.run()
-
-	// THEN
-	require.NoError(t, err)
-	assert.Equal(t, "✓ Updated variable TEST_VARIABLE for project owner/repo with scope *.\n", stdout.String())
+	assert.NoError(t, err)
+	assert.Equal(t, stdout.String(), "✓ Updated variable TEST_VARIABLE for project owner/repo with scope *.\n")
 }
 
 func Test_updateRun_group(t *testing.T) {
-	// GIVEN
-	testClient := gitlabtesting.NewTestClient(t)
-	testClient.MockGroupVariables.EXPECT().
-		UpdateVariable("mygroup", "TEST_VARIABLE", gomock.Any()).
-		Return(&gitlab.GroupVariable{
-			Key:          "TEST_VARIABLE",
-			Value:        "blargh",
-			VariableType: "env_var",
-			Protected:    false,
-			Masked:       false,
-		}, nil, nil)
+	reg := &httpmock.Mocker{}
+	defer reg.Verify(t)
+
+	reg.RegisterResponder(http.MethodPut, "/groups/mygroup/variables/TEST_VARIABLE",
+		httpmock.NewStringResponse(http.StatusCreated, `
+			{
+    			"key": "TEST_VARIABLE",
+    			"value": "blargh",
+    			"variable_type": "env_var",
+    			"protected": false,
+    			"masked": false
+			}
+		`),
+	)
 
 	io, _, stdout, _ := cmdtest.TestIOStreams()
 
 	opts := &options{
 		apiClient: func(repoHost string) (*api.Client, error) {
-			return cmdtest.NewTestApiClient(t, nil, "", "gitlab.com", api.WithGitLabClient(testClient.Client)), nil
+			return cmdtest.NewTestApiClient(t, &http.Client{Transport: reg}, "", "gitlab.com"), nil
 		},
 		baseRepo: func() (glrepo.Interface, error) {
-			return glrepo.New("owner", "repo", "gitlab.com"), nil
+			return glrepo.FromFullName("owner/repo", glinstance.DefaultHostname)
 		},
 		io:    io,
 		key:   "TEST_VARIABLE",
@@ -243,10 +244,7 @@ func Test_updateRun_group(t *testing.T) {
 		group: "mygroup",
 	}
 
-	// WHEN
 	err := opts.run()
-
-	// THEN
-	require.NoError(t, err)
-	assert.Equal(t, "✓ Updated variable TEST_VARIABLE for group mygroup.\n", stdout.String())
+	assert.NoError(t, err)
+	assert.Equal(t, stdout.String(), "✓ Updated variable TEST_VARIABLE for group mygroup.\n")
 }

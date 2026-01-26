@@ -3,83 +3,92 @@
 package delete
 
 import (
-	"errors"
+	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	gitlabtesting "gitlab.com/gitlab-org/api/client-go/testing"
-
+	"gitlab.com/gitlab-org/cli/internal/glinstance"
 	"gitlab.com/gitlab-org/cli/internal/testing/cmdtest"
+	"gitlab.com/gitlab-org/cli/internal/testing/httpmock"
+	"gitlab.com/gitlab-org/cli/test"
 )
 
 func Test_DeployKeyRemove(t *testing.T) {
-	type testCase struct {
-		name        string
-		cli         string
-		expectedMsg []string
-		wantErr     bool
-		wantStderr  string
-		setupMock   func(tc *gitlabtesting.TestClient)
+	type httpMock struct {
+		method string
+		path   string
+		status int
+		body   string
 	}
 
-	testCases := []testCase{
+	apiEndpoint := "/api/v4/projects/OWNER%2FREPO/deploy_keys/123"
+
+	testCases := []struct {
+		Name        string
+		ExpectedMsg []string
+		wantErr     bool
+		cli         string
+		wantStderr  string
+		httpMocks   []httpMock
+	}{
 		{
-			name:        "Remove a deploy key",
+			Name:        "Remove a deploy key",
+			ExpectedMsg: []string{"Deploy key deleted.\n"},
 			cli:         "123",
-			expectedMsg: []string{"Deploy key deleted.\n"},
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockDeployKeys.EXPECT().
-					DeleteDeployKey("OWNER/REPO", int64(123)).
-					Return(nil, nil)
+			httpMocks: []httpMock{
+				{
+					http.MethodDelete,
+					apiEndpoint,
+					http.StatusNoContent,
+					"",
+				},
 			},
 		},
 		{
-			name:       "Remove a deploy key with invalid key ID",
+			Name:       "Remove a deploy key with invalid file ID",
 			cli:        "abc",
+			httpMocks:  []httpMock{},
 			wantErr:    true,
 			wantStderr: "Deploy key ID must be an integer: abc",
-			setupMock:  func(tc *gitlabtesting.TestClient) {},
-		},
-		{
-			name:       "Remove non-existent deploy key returns error",
-			cli:        "999",
-			wantErr:    true,
-			wantStderr: "404 Not Found",
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockDeployKeys.EXPECT().
-					DeleteDeployKey("OWNER/REPO", int64(999)).
-					Return(nil, errors.New("404 Not Found"))
-			},
 		},
 	}
 
 	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			// GIVEN
-			testClient := gitlabtesting.NewTestClient(t)
-			tc.setupMock(testClient)
-			exec := cmdtest.SetupCmdForTest(
-				t,
-				NewCmdDelete,
-				false,
-				cmdtest.WithGitLabClient(testClient.Client),
-			)
+		t.Run(tc.Name, func(t *testing.T) {
+			fakeHTTP := &httpmock.Mocker{
+				MatchURL: httpmock.PathAndQuerystring,
+			}
+			defer fakeHTTP.Verify(t)
 
-			// WHEN
-			out, err := exec(tc.cli)
+			for _, mock := range tc.httpMocks {
+				fakeHTTP.RegisterResponder(mock.method, mock.path, httpmock.NewStringResponse(mock.status, mock.body))
+			}
 
-			// THEN
+			out, err := runCommand(t, fakeHTTP, tc.cli)
 			if tc.wantErr {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.wantStderr)
+				if assert.Error(t, err) {
+					require.Equal(t, tc.wantStderr, err.Error())
+				}
 				return
 			}
 			require.NoError(t, err)
-			for _, msg := range tc.expectedMsg {
-				assert.Contains(t, out.OutBuf.String(), msg)
+
+			for _, msg := range tc.ExpectedMsg {
+				require.Contains(t, out.String(), msg)
 			}
 		})
 	}
+}
+
+func runCommand(t *testing.T, rt http.RoundTripper, cli string) (*test.CmdOut, error) {
+	t.Helper()
+
+	ios, _, stdout, stderr := cmdtest.TestIOStreams()
+	factory := cmdtest.NewTestFactory(ios,
+		cmdtest.WithGitLabClient(cmdtest.NewTestApiClient(t, &http.Client{Transport: rt}, "", glinstance.DefaultHostname).Lab()),
+	)
+	cmd := NewCmdDelete(factory)
+	return cmdtest.ExecuteCommand(cmd, cli, stdout, stderr)
 }

@@ -15,6 +15,7 @@ import (
 	gitlabtesting "gitlab.com/gitlab-org/api/client-go/testing"
 
 	"gitlab.com/gitlab-org/cli/internal/testing/cmdtest"
+	"gitlab.com/gitlab-org/cli/test"
 )
 
 func Test_AddGPGKey(t *testing.T) {
@@ -108,11 +109,13 @@ func Test_AddGPGKey(t *testing.T) {
 			testClient := gitlabtesting.NewTestClient(t)
 			tc.setupMock(testClient)
 
-			exec := cmdtest.SetupCmdForTest(t, NewCmdAdd, false,
-				cmdtest.WithStdin(tc.stdin),
-				cmdtest.WithGitLabClient(testClient.Client),
-			)
-			out, err := exec(tc.cli)
+			var out *test.CmdOut
+			var err error
+
+			ios, _, stdout, stderr := cmdtest.TestIOStreams()
+			factory := cmdtest.NewTestFactory(ios, cmdtest.WithStdin(tc.stdin), cmdtest.WithGitLabClient(testClient.Client))
+			cmd := NewCmdAdd(factory)
+			out, err = cmdtest.ExecuteCommand(cmd, tc.cli, stdout, stderr)
 
 			// THEN
 			if tc.wantErr {
@@ -122,7 +125,7 @@ func Test_AddGPGKey(t *testing.T) {
 			}
 			require.NoError(t, err)
 			for _, msg := range tc.ExpectedMsg {
-				assert.Contains(t, out.String(), msg)
+				assert.Contains(t, out.OutBuf.String(), msg)
 			}
 		})
 	}

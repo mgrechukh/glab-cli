@@ -3,149 +3,142 @@
 package revoke
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/MakeNowJust/heredoc/v2"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
-
-	gitlab "gitlab.com/gitlab-org/api/client-go"
-	gitlabtesting "gitlab.com/gitlab-org/api/client-go/testing"
 
 	"gitlab.com/gitlab-org/cli/internal/glinstance"
 	"gitlab.com/gitlab-org/cli/internal/testing/cmdtest"
+	"gitlab.com/gitlab-org/cli/internal/testing/httpmock"
+	"gitlab.com/gitlab-org/cli/test"
 )
 
-func TestMrRevoke(t *testing.T) {
-	t.Parallel()
+func runCommand(t *testing.T, rt http.RoundTripper, cli string) (*test.CmdOut, error) {
+	t.Helper()
 
-	tc := gitlabtesting.NewTestClient(t)
+	ios, _, stdout, stderr := cmdtest.TestIOStreams()
 
-	// Mock getting the merge request
-	tc.MockMergeRequests.EXPECT().
-		GetMergeRequest("OWNER/REPO", int64(123), gomock.Any(), gomock.Any()).
-		Return(&gitlab.MergeRequest{
-			BasicMergeRequest: gitlab.BasicMergeRequest{
-				ID:          123,
-				IID:         123,
-				ProjectID:   3,
-				Title:       "test mr title",
-				Description: "test mr description",
-				State:       "opened",
-			},
-		}, nil, nil)
-
-	// Mock unapproving the merge request
-	tc.MockMergeRequestApprovals.EXPECT().
-		UnapproveMergeRequest("OWNER/REPO", int64(123), gomock.Any()).
-		Return(nil, nil)
-
-	exec := cmdtest.SetupCmdForTest(t, NewCmdRevoke, false,
-		cmdtest.WithGitLabClient(tc.Client),
-		cmdtest.WithBaseRepo("OWNER", "REPO", glinstance.DefaultHostname),
-	)
-
-	output, err := exec("123")
-
-	require.NoError(t, err)
-	assert.Equal(t, heredoc.Doc(`
-		- Revoking approval for merge request !123...
-		✓ Merge request approval revoked.
-		`), output.String())
-	assert.Empty(t, output.Stderr())
-}
-
-func TestMrRevokeCurrentBranch(t *testing.T) {
-	t.Parallel()
-
-	tc := gitlabtesting.NewTestClient(t)
-
-	// Mock listing merge requests for current branch
-	tc.MockMergeRequests.EXPECT().
-		ListProjectMergeRequests("OWNER/REPO", gomock.Any(), gomock.Any()).
-		Return([]*gitlab.BasicMergeRequest{
-			{
-				ID:          123,
-				IID:         123,
-				ProjectID:   3,
-				Title:       "test mr title",
-				Description: "test mr description",
-				State:       "opened",
-			},
-		}, nil, nil)
-
-	// Mock getting the merge request
-	tc.MockMergeRequests.EXPECT().
-		GetMergeRequest("OWNER/REPO", int64(123), gomock.Any(), gomock.Any()).
-		Return(&gitlab.MergeRequest{
-			BasicMergeRequest: gitlab.BasicMergeRequest{
-				ID:          123,
-				IID:         123,
-				ProjectID:   3,
-				Title:       "test mr title",
-				Description: "test mr description",
-				State:       "opened",
-			},
-		}, nil, nil)
-
-	// Mock unapproving the merge request
-	tc.MockMergeRequestApprovals.EXPECT().
-		UnapproveMergeRequest("OWNER/REPO", int64(123), gomock.Any()).
-		Return(nil, nil)
-
-	exec := cmdtest.SetupCmdForTest(t, NewCmdRevoke, false,
-		cmdtest.WithGitLabClient(tc.Client),
-		cmdtest.WithBaseRepo("OWNER", "REPO", glinstance.DefaultHostname),
+	factory := cmdtest.NewTestFactory(ios,
+		cmdtest.WithGitLabClient(cmdtest.NewTestApiClient(t, &http.Client{Transport: rt}, "", glinstance.DefaultHostname).Lab()),
 		cmdtest.WithBranch("current-branch"),
 	)
 
-	output, err := exec("")
+	cmd := NewCmdRevoke(factory)
 
-	require.NoError(t, err)
-	assert.Equal(t, heredoc.Doc(`
-		- Revoking approval for merge request !123...
-		✓ Merge request approval revoked.
-		`), output.String())
-	assert.Empty(t, output.Stderr())
+	return cmdtest.ExecuteCommand(cmd, cli, stdout, stderr)
 }
 
-func TestMrRevokeDraft(t *testing.T) {
-	t.Parallel()
+func TestMrRevoke(t *testing.T) {
+	type httpMock struct {
+		method string
+		path   string
+		status int
+		body   string
+	}
 
-	tc := gitlabtesting.NewTestClient(t)
+	tests := []struct {
+		name      string
+		cli       string
+		httpMocks []httpMock
 
-	// Mock getting a draft merge request
-	tc.MockMergeRequests.EXPECT().
-		GetMergeRequest("OWNER/REPO", int64(456), gomock.Any(), gomock.Any()).
-		Return(&gitlab.MergeRequest{
-			BasicMergeRequest: gitlab.BasicMergeRequest{
-				ID:          456,
-				IID:         456,
-				ProjectID:   3,
-				Title:       "Draft: test mr title",
-				Description: "test mr description",
-				State:       "opened",
-				Draft:       true,
+		expectedOut string
+	}{
+		{
+			name: "when an MR is unapproved using an MR id",
+			cli:  "123",
+			httpMocks: []httpMock{
+				{
+					http.MethodGet,
+					"/api/v4/projects/OWNER/REPO/merge_requests/123",
+					http.StatusOK,
+					`{
+								"id": 123,
+								"iid": 123,
+								"project_id": 3,
+								"title": "test mr title",
+								"description": "test mr description",
+								"state": "opened"
+							}`,
+				},
+				{
+					http.MethodPost,
+					"/api/v4/projects/OWNER/REPO/merge_requests/123/unapprove",
+					http.StatusCreated,
+					"{}",
+				},
 			},
-		}, nil, nil)
 
-	// Mock unapproving the draft merge request
-	tc.MockMergeRequestApprovals.EXPECT().
-		UnapproveMergeRequest("OWNER/REPO", int64(456), gomock.Any()).
-		Return(nil, nil)
+			expectedOut: heredoc.Doc(`
+				- Revoking approval for merge request !123...
+				✓ Merge request approval revoked.
+				`),
+		},
+		{
+			name: "when an MR is unapproved using the current branch",
+			cli:  "",
+			httpMocks: []httpMock{
+				{
+					http.MethodGet,
+					"/api/v4/projects/OWNER/REPO/merge_requests/123",
+					http.StatusOK,
+					`{
+								"id": 123,
+								"iid": 123,
+								"project_id": 3,
+								"title": "test mr title",
+								"description": "test mr description",
+								"state": "opened"
+							}`,
+				},
+				{
+					http.MethodGet,
+					"/api/v4/projects/OWNER/REPO/merge_requests?per_page=30&source_branch=current-branch&state=opened",
+					http.StatusOK,
+					`[{
+								"id": 123,
+								"iid": 123,
+								"project_id": 3,
+								"title": "test mr title",
+								"description": "test mr description",
+								"state": "opened"
+							}]`,
+				},
+				{
+					http.MethodPost,
+					"/api/v4/projects/OWNER/REPO/merge_requests/123/unapprove",
+					http.StatusCreated,
+					"{}",
+				},
+			},
 
-	exec := cmdtest.SetupCmdForTest(t, NewCmdRevoke, false,
-		cmdtest.WithGitLabClient(tc.Client),
-		cmdtest.WithBaseRepo("OWNER", "REPO", glinstance.DefaultHostname),
-	)
+			expectedOut: heredoc.Doc(`
+				- Revoking approval for merge request !123...
+				✓ Merge request approval revoked.
+				`),
+		},
+	}
 
-	output, err := exec("456")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeHTTP := &httpmock.Mocker{
+				MatchURL: httpmock.PathAndQuerystring,
+			}
+			defer fakeHTTP.Verify(t)
 
-	require.NoError(t, err)
-	assert.Equal(t, heredoc.Doc(`
-		- Revoking approval for merge request !456...
-		✓ Merge request approval revoked.
-		`), output.String())
-	assert.Empty(t, output.Stderr())
+			for _, mock := range tc.httpMocks {
+				fakeHTTP.RegisterResponder(mock.method, mock.path, httpmock.NewStringResponse(mock.status, mock.body))
+			}
+
+			output, err := runCommand(t, fakeHTTP, tc.cli)
+
+			if assert.NoErrorf(t, err, "error running command `mr revoke %s`: %v", tc.cli, err) {
+				out := output.String()
+
+				assert.Equal(t, tc.expectedOut, out)
+				assert.Empty(t, output.Stderr())
+			}
+		})
+	}
 }

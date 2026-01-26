@@ -14,33 +14,39 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
-
-	gitlab "gitlab.com/gitlab-org/api/client-go"
-	gitlabtesting "gitlab.com/gitlab-org/api/client-go/testing"
 
 	"gitlab.com/gitlab-org/cli/internal/api"
 	"gitlab.com/gitlab-org/cli/internal/cmdutils"
 	"gitlab.com/gitlab-org/cli/internal/config"
 	"gitlab.com/gitlab-org/cli/internal/testing/cmdtest"
+	"gitlab.com/gitlab-org/cli/internal/testing/httpmock"
+	"gitlab.com/gitlab-org/cli/test"
 )
 
-// mockClientCreator sets up the clientCreator with a test client and returns a cleanup function.
-func mockClientCreator(t *testing.T, testClient *gitlabtesting.TestClient) {
+func runCommand(t *testing.T, rt http.RoundTripper, version string) (*test.CmdOut, error) {
 	t.Helper()
+
+	ios, _, stdout, stderr := cmdtest.TestIOStreams(cmdtest.WithTestIOStreamsAsTTY(true))
+
+	// Override clientCreator to use the mocked HTTP transport
 	oldCreator := clientCreator
 	clientCreator = func(userAgent string, options ...api.ClientOption) (*api.Client, error) {
-		return api.NewClient(
-			func(*http.Client) (gitlab.AuthSource, error) {
-				return gitlab.AccessTokenAuthSource{Token: ""}, nil
-			},
-			api.WithGitLabClient(testClient.Client),
-		)
+		opts := append([]api.ClientOption{api.WithHTTPClient(&http.Client{Transport: rt})}, options...)
+		return createUnauthenticatedClient(userAgent, opts...)
 	}
 	t.Cleanup(func() {
 		clientCreator = oldCreator
 	})
+
+	factory := cmdtest.NewTestFactory(
+		ios,
+		cmdtest.WithBuildInfo(api.BuildInfo{Version: version}),
+	)
+
+	cmd := NewCheckUpdateCmd(factory)
+
+	defer config.StubWriteConfig(io.Discard, io.Discard)()
+	return cmdtest.ExecuteCommand(cmd, "", stdout, stderr)
 }
 
 func TestNewCheckUpdateCmd(t *testing.T) {
@@ -71,89 +77,74 @@ func TestNewCheckUpdateCmd(t *testing.T) {
 			stdErr: "A new version of glab has been released: v1.11.0 -> v1.11.1\nhttps://gitlab.com/gitlab-org/cli/-/releases/v1.11.1\n",
 		},
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			testClient := gitlabtesting.NewTestClient(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeHTTP := &httpmock.Mocker{
+				MatchURL: httpmock.PathAndQuerystring,
+			}
+			defer fakeHTTP.Verify(t)
 
-			// Mock ListReleases
-			testClient.MockReleases.EXPECT().
-				ListReleases("gitlab-org/cli", gomock.Any()).
-				DoAndReturn(func(pid any, opts *gitlab.ListReleasesOptions, options ...gitlab.RequestOptionFunc) ([]*gitlab.Release, *gitlab.Response, error) {
-					// Verify pagination options
-					assert.Equal(t, int64(1), opts.Page)
-					assert.Equal(t, int64(1), opts.PerPage)
-					return []*gitlab.Release{
-						{
-							TagName:    "v1.11.1",
-							Name:       "v1.11.1",
-							ReleasedAt: gitlab.Ptr(time.Date(2020, 11, 3, 5, 39, 4, 0, time.UTC)),
-						},
-					}, nil, nil
-				})
+			fakeHTTP.RegisterResponder(http.MethodGet, `https://gitlab.com/api/v4/projects/gitlab-org/cli/releases?page=1&per_page=1`,
+				func(req *http.Request) (*http.Response, error) {
+					// Ensure no token is sent when checking for a glab update
+					assert.Empty(t, req.Header.Get("Private-Token"))
 
-			mockClientCreator(t, testClient)
+					resp, _ := httpmock.NewStringResponse(http.StatusOK, `[{
+							"tag_name": "v1.11.1",
+							"name": "v1.11.1",
+							"created_at": "2020-11-03T05:33:29Z",
+							"released_at": "2020-11-03T05:39:04Z"
+						}]`)(req)
 
-			defer config.StubWriteConfig(io.Discard, io.Discard)()
-
-			exec := cmdtest.SetupCmdForTest(t, NewCheckUpdateCmd, true,
-				cmdtest.WithBuildInfo(api.BuildInfo{Version: tc.args.version}),
+					return resp, nil
+				},
 			)
-			output, err := exec("")
 
-			require.NoError(t, err)
+			output, err := runCommand(t, fakeHTTP, tt.args.version)
+
+			assert.Nil(t, err)
 			assert.Empty(t, output.String())
-			assert.Equal(t, tc.stdErr, output.Stderr())
+			assert.Equal(t, tt.stdErr, output.Stderr())
 		})
 	}
 }
 
 func TestNewCheckUpdateCmd_error(t *testing.T) {
-	testClient := gitlabtesting.NewTestClient(t)
-
-	// Mock ListReleases - returns 404
-	notFoundResp := &gitlab.Response{
-		Response: &http.Response{StatusCode: http.StatusNotFound},
+	fakeHTTP := &httpmock.Mocker{
+		MatchURL: httpmock.PathAndQuerystring,
 	}
-	testClient.MockReleases.EXPECT().
-		ListReleases("gitlab-org/cli", gomock.Any()).
-		Return(nil, notFoundResp, errors.New("404 Not Found"))
+	defer fakeHTTP.Verify(t)
 
-	mockClientCreator(t, testClient)
+	fakeHTTP.RegisterResponder(http.MethodGet, `https://gitlab.com/api/v4/projects/gitlab-org/cli/releases?page=1&per_page=1`,
+		httpmock.NewStringResponse(http.StatusNotFound, `
+				{
+					"message": "test error"
+				}
+			`))
 
-	defer config.StubWriteConfig(io.Discard, io.Discard)()
+	output, err := runCommand(t, fakeHTTP, "1.11.0")
 
-	exec := cmdtest.SetupCmdForTest(t, NewCheckUpdateCmd, true,
-		cmdtest.WithBuildInfo(api.BuildInfo{Version: "1.11.0"}),
-	)
-	output, err := exec("")
-
-	require.Error(t, err)
+	assert.NotNil(t, err)
 	assert.Equal(t, `failed checking for glab updates: 404 Not Found`, err.Error())
-	assert.Empty(t, output.String())
-	assert.Empty(t, output.Stderr())
+	assert.Equal(t, "", output.String())
+	assert.Equal(t, "", output.Stderr())
 }
 
 func TestNewCheckUpdateCmd_no_release(t *testing.T) {
-	testClient := gitlabtesting.NewTestClient(t)
+	fakeHTTP := &httpmock.Mocker{
+		MatchURL: httpmock.PathAndQuerystring,
+	}
+	defer fakeHTTP.Verify(t)
 
-	// Mock ListReleases - returns empty list
-	testClient.MockReleases.EXPECT().
-		ListReleases("gitlab-org/cli", gomock.Any()).
-		Return([]*gitlab.Release{}, nil, nil)
+	fakeHTTP.RegisterResponder(http.MethodGet, `https://gitlab.com/api/v4/projects/gitlab-org/cli/releases?page=1&per_page=1`,
+		httpmock.NewStringResponse(http.StatusOK, `[]`))
 
-	mockClientCreator(t, testClient)
+	output, err := runCommand(t, fakeHTTP, "1.11.0")
 
-	defer config.StubWriteConfig(io.Discard, io.Discard)()
-
-	exec := cmdtest.SetupCmdForTest(t, NewCheckUpdateCmd, true,
-		cmdtest.WithBuildInfo(api.BuildInfo{Version: "1.11.0"}),
-	)
-	output, err := exec("")
-
-	require.Error(t, err)
+	assert.NotNil(t, err)
 	assert.Equal(t, "no release found for glab.", err.Error())
-	assert.Empty(t, output.String())
-	assert.Empty(t, output.Stderr())
+	assert.Equal(t, "", output.String())
+	assert.Equal(t, "", output.Stderr())
 }
 
 func Test_isOlderVersion(t *testing.T) {

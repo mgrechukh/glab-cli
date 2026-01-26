@@ -141,8 +141,7 @@ func EditorPrompt(ctx context.Context, io *iostreams.IOStreams, response *string
 		defaultBody += templateContent
 	}
 
-	// Use DirectEditor to directly open the external editor with the content
-	err := io.DirectEditor(ctx, response, defaultBody, editorCommand)
+	err := io.Editor(ctx, response, question, "", defaultBody, editorCommand)
 	if err != nil {
 		return err
 	}

@@ -6,19 +6,16 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
-	gitlab "gitlab.com/gitlab-org/api/client-go"
-	gitlabtesting "gitlab.com/gitlab-org/api/client-go/testing"
-
-	"gitlab.com/gitlab-org/cli/internal/api"
 	"gitlab.com/gitlab-org/cli/internal/cmdutils"
 	"gitlab.com/gitlab-org/cli/internal/git"
 	git_testing "gitlab.com/gitlab-org/cli/internal/git/testing"
+	"gitlab.com/gitlab-org/cli/internal/glinstance"
 	"gitlab.com/gitlab-org/cli/internal/glrepo"
 	"gitlab.com/gitlab-org/cli/internal/testing/cmdtest"
+	"gitlab.com/gitlab-org/cli/internal/testing/stacks"
 )
 
 type SyncScenario struct {
@@ -33,28 +30,16 @@ type TestRef struct {
 	state string
 }
 
-func setupTestFactory(t *testing.T, testClient *gitlabtesting.TestClient) (cmdutils.Factory, *options) {
+func setupTestFactory(t *testing.T, rt http.RoundTripper) (cmdutils.Factory, *options) {
 	t.Helper()
 
 	ios, _, _, _ := cmdtest.TestIOStreams()
 
-	// Create api.Client that wraps the mock gitlab.Client
-	apiClient, err := api.NewClient(
-		func(*http.Client) (gitlab.AuthSource, error) {
-			return gitlab.AccessTokenAuthSource{Token: ""}, nil
-		},
-		api.WithGitLabClient(testClient.Client),
-	)
-	require.NoError(t, err)
-
 	f := cmdtest.NewTestFactory(ios,
-		cmdtest.WithGitLabClient(testClient.Client),
+		cmdtest.WithGitLabClient(cmdtest.NewTestApiClient(t, &http.Client{Transport: rt}, "", glinstance.DefaultHostname).Lab()),
 		func(f *cmdtest.Factory) {
 			f.BaseRepoStub = func() (glrepo.Interface, error) {
 				return glrepo.TestProject("stack_guy", "stackproject"), nil
-			}
-			f.ApiClientStub = func(repoHost string) (*api.Client, error) {
-				return apiClient, nil
 			}
 		},
 		func(f *cmdtest.Factory) {
@@ -89,13 +74,13 @@ func Test_stackSync(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		args       args
-		setupMocks func(t *testing.T, testClient *gitlabtesting.TestClient)
-		wantErr    bool
+		name      string
+		args      args
+		httpMocks []stacks.HttpMock
+		wantErr   bool
 	}{
 		{
-			name: "two branches, 1st branch has MR, 2nd branch behind, stacks are named",
+			name: "two branches, 1st branch has MR, 2nd branch behind",
 			args: args{
 				stack: SyncScenario{
 					title: "my cool stack",
@@ -103,80 +88,23 @@ func Test_stackSync(t *testing.T) {
 						"1": {
 							ref: git.StackRef{
 								SHA: "1", Prev: "", Next: "2", Branch: "Branch1",
-								MR:          "http://gitlab.com/stack_guy/stackproject/-/merge_requests/1",
-								Description: "single line desc",
+								MR: "http://gitlab.com/stack_guy/stackproject/-/merge_requests/1",
 							},
 							state: NothingToCommit,
 						},
 						"2": {
-							ref:   git.StackRef{SHA: "2", Prev: "1", Next: "", Branch: "Branch2", MR: "", Description: "multi line desc\n\ndescription, bark!"},
+							ref:   git.StackRef{SHA: "2", Prev: "1", Next: "", Branch: "Branch2", MR: ""},
 							state: BranchIsBehind,
 						},
 					},
 				},
 			},
-			setupMocks: func(t *testing.T, testClient *gitlabtesting.TestClient) {
-				t.Helper()
-				// MockStackUser
-				testClient.MockUsers.EXPECT().
-					CurrentUser(gomock.Any()).
-					Return(&gitlab.User{Username: "stack_guy"}, nil, nil)
 
-				// MockListStackMRsByBranch("Branch1", "25")
-				testClient.MockMergeRequests.EXPECT().
-					ListProjectMergeRequests("stack_guy/stackproject", gomock.Any()).
-					DoAndReturn(func(pid any, opts *gitlab.ListProjectMergeRequestsOptions, options ...gitlab.RequestOptionFunc) ([]*gitlab.BasicMergeRequest, *gitlab.Response, error) {
-						assert.Equal(t, "Branch1", *opts.SourceBranch)
-						return []*gitlab.BasicMergeRequest{
-							{
-								ID:           25,
-								IID:          25,
-								ProjectID:    3,
-								Title:        "test mr title",
-								TargetBranch: "main",
-								SourceBranch: "Branch1",
-								State:        "opened",
-								Description:  "test mr description25",
-								Author:       &gitlab.BasicUser{ID: 1, Username: "admin"},
-							},
-						}, nil, nil
-					})
-
-				// MockGetStackMR("Branch1", "25")
-				testClient.MockMergeRequests.EXPECT().
-					GetMergeRequest("stack_guy/stackproject", int64(25), gomock.Any()).
-					Return(&gitlab.MergeRequest{
-						BasicMergeRequest: gitlab.BasicMergeRequest{
-							ID:           25,
-							IID:          25,
-							ProjectID:    3,
-							Title:        "test mr title",
-							TargetBranch: "main",
-							SourceBranch: "Branch1",
-							State:        "opened",
-							Description:  "test mr description25",
-							Author:       &gitlab.BasicUser{ID: 1, Username: "admin"},
-						},
-					}, nil, nil)
-
-				// MockPostStackMR(Source: "Branch2", Target: "Branch1", Title: "multi line desc", Description: "description, bark!")
-				testClient.MockMergeRequests.EXPECT().
-					CreateMergeRequest("stack_guy/stackproject", gomock.Any()).
-					DoAndReturn(func(pid any, opts *gitlab.CreateMergeRequestOptions, options ...gitlab.RequestOptionFunc) (*gitlab.MergeRequest, *gitlab.Response, error) {
-						assert.Equal(t, "Branch2", *opts.SourceBranch)
-						assert.Equal(t, "Branch1", *opts.TargetBranch)
-						assert.Equal(t, "multi line desc", *opts.Title)
-						assert.Equal(t, "description, bark!", *opts.Description)
-						return &gitlab.MergeRequest{
-							BasicMergeRequest: gitlab.BasicMergeRequest{
-								IID:          42,
-								SourceBranch: "Branch2",
-								TargetBranch: "Branch1",
-								Title:        "multi line desc",
-								Description:  "description, bark!",
-							},
-						}, nil, nil
-					})
+			httpMocks: []stacks.HttpMock{
+				stacks.MockStackUser(),
+				stacks.MockListStackMRsByBranch("Branch1", "25"),
+				stacks.MockGetStackMR("Branch1", "25"),
+				stacks.MockPostStackMR("Branch2", "Branch1", "3"),
 			},
 		},
 
@@ -187,7 +115,7 @@ func Test_stackSync(t *testing.T) {
 					title: "my cool stack",
 					refs: map[string]TestRef{
 						"1": {
-							ref:   git.StackRef{SHA: "1", Prev: "", Next: "2", Branch: "Branch1", MR: "", Description: "some description"},
+							ref:   git.StackRef{SHA: "1", Prev: "", Next: "2", Branch: "Branch1", MR: ""},
 							state: NothingToCommit,
 						},
 						"2": {
@@ -197,44 +125,11 @@ func Test_stackSync(t *testing.T) {
 					},
 				},
 			},
-			setupMocks: func(t *testing.T, testClient *gitlabtesting.TestClient) {
-				t.Helper()
-				// MockStackUser
-				testClient.MockUsers.EXPECT().
-					CurrentUser(gomock.Any()).
-					Return(&gitlab.User{Username: "stack_guy"}, nil, nil)
 
-				// MockPostStackMR(Source: "Branch1", Target: "main", Title: "some description")
-				testClient.MockMergeRequests.EXPECT().
-					CreateMergeRequest("stack_guy/stackproject", gomock.Any()).
-					DoAndReturn(func(pid any, opts *gitlab.CreateMergeRequestOptions, options ...gitlab.RequestOptionFunc) (*gitlab.MergeRequest, *gitlab.Response, error) {
-						assert.Equal(t, "Branch1", *opts.SourceBranch)
-						assert.Equal(t, "main", *opts.TargetBranch)
-						assert.Equal(t, "some description", *opts.Title)
-						return &gitlab.MergeRequest{
-							BasicMergeRequest: gitlab.BasicMergeRequest{
-								IID:          43,
-								SourceBranch: "Branch1",
-								TargetBranch: "main",
-								Title:        "some description",
-							},
-						}, nil, nil
-					})
-
-				// MockPostStackMR(Source: "Branch2", Target: "Branch1")
-				testClient.MockMergeRequests.EXPECT().
-					CreateMergeRequest("stack_guy/stackproject", gomock.Any()).
-					DoAndReturn(func(pid any, opts *gitlab.CreateMergeRequestOptions, options ...gitlab.RequestOptionFunc) (*gitlab.MergeRequest, *gitlab.Response, error) {
-						assert.Equal(t, "Branch2", *opts.SourceBranch)
-						assert.Equal(t, "Branch1", *opts.TargetBranch)
-						return &gitlab.MergeRequest{
-							BasicMergeRequest: gitlab.BasicMergeRequest{
-								IID:          44,
-								SourceBranch: "Branch2",
-								TargetBranch: "Branch1",
-							},
-						}, nil, nil
-					})
+			httpMocks: []stacks.HttpMock{
+				stacks.MockStackUser(),
+				stacks.MockPostStackMR("Branch1", "main", "3"),
+				stacks.MockPostStackMR("Branch2", "Branch1", "3"),
 			},
 		},
 
@@ -275,52 +170,16 @@ func Test_stackSync(t *testing.T) {
 					},
 				},
 			},
-			setupMocks: func(t *testing.T, testClient *gitlabtesting.TestClient) {
-				t.Helper()
-				// MockStackUser
-				testClient.MockUsers.EXPECT().
-					CurrentUser(gomock.Any()).
-					Return(&gitlab.User{Username: "stack_guy"}, nil, nil)
 
-				// MockListStackMRsByBranch("Branch1", "25")
-				testClient.MockMergeRequests.EXPECT().
-					ListProjectMergeRequests("stack_guy/stackproject", gomock.Any()).
-					DoAndReturn(func(pid any, opts *gitlab.ListProjectMergeRequestsOptions, options ...gitlab.RequestOptionFunc) ([]*gitlab.BasicMergeRequest, *gitlab.Response, error) {
-						assert.Equal(t, "Branch1", *opts.SourceBranch)
-						return []*gitlab.BasicMergeRequest{
-							{
-								ID:           25,
-								IID:          25,
-								ProjectID:    3,
-								SourceBranch: "Branch1",
-								State:        "opened",
-							},
-						}, nil, nil
-					})
-
-				// MockGetStackMR("Branch1", "25")
-				testClient.MockMergeRequests.EXPECT().
-					GetMergeRequest("stack_guy/stackproject", int64(25), gomock.Any()).
-					Return(&gitlab.MergeRequest{
-						BasicMergeRequest: gitlab.BasicMergeRequest{
-							ID:           25,
-							IID:          25,
-							ProjectID:    3,
-							SourceBranch: "Branch1",
-							State:        "opened",
-						},
-					}, nil, nil)
-
-				// Create MRs for Branch2-6
-				for i := 2; i <= 6; i++ {
-					testClient.MockMergeRequests.EXPECT().
-						CreateMergeRequest("stack_guy/stackproject", gomock.Any()).
-						Return(&gitlab.MergeRequest{
-							BasicMergeRequest: gitlab.BasicMergeRequest{
-								IID: int64(40 + i),
-							},
-						}, nil, nil)
-				}
+			httpMocks: []stacks.HttpMock{
+				stacks.MockStackUser(),
+				stacks.MockListStackMRsByBranch("Branch1", "25"),
+				stacks.MockGetStackMR("Branch1", "25"),
+				stacks.MockPostStackMR("Branch2", "Branch1", "3"),
+				stacks.MockPostStackMR("Branch3", "Branch2", "3"),
+				stacks.MockPostStackMR("Branch4", "Branch3", "3"),
+				stacks.MockPostStackMR("Branch5", "Branch4", "3"),
+				stacks.MockPostStackMR("Branch6", "Branch5", "3"),
 			},
 		},
 		{
@@ -341,42 +200,11 @@ func Test_stackSync(t *testing.T) {
 					},
 				},
 			},
-			setupMocks: func(t *testing.T, testClient *gitlabtesting.TestClient) {
-				t.Helper()
-				// MockStackUser
-				testClient.MockUsers.EXPECT().
-					CurrentUser(gomock.Any()).
-					Return(&gitlab.User{Username: "stack_guy"}, nil, nil)
 
-				// MockPostStackMR(Source: "Branch1", Target: "jawn")
-				testClient.MockMergeRequests.EXPECT().
-					CreateMergeRequest("stack_guy/stackproject", gomock.Any()).
-					DoAndReturn(func(pid any, opts *gitlab.CreateMergeRequestOptions, options ...gitlab.RequestOptionFunc) (*gitlab.MergeRequest, *gitlab.Response, error) {
-						assert.Equal(t, "Branch1", *opts.SourceBranch)
-						assert.Equal(t, "jawn", *opts.TargetBranch)
-						return &gitlab.MergeRequest{
-							BasicMergeRequest: gitlab.BasicMergeRequest{
-								IID:          45,
-								SourceBranch: "Branch1",
-								TargetBranch: "jawn",
-							},
-						}, nil, nil
-					})
-
-				// MockPostStackMR(Source: "Branch2", Target: "Branch1")
-				testClient.MockMergeRequests.EXPECT().
-					CreateMergeRequest("stack_guy/stackproject", gomock.Any()).
-					DoAndReturn(func(pid any, opts *gitlab.CreateMergeRequestOptions, options ...gitlab.RequestOptionFunc) (*gitlab.MergeRequest, *gitlab.Response, error) {
-						assert.Equal(t, "Branch2", *opts.SourceBranch)
-						assert.Equal(t, "Branch1", *opts.TargetBranch)
-						return &gitlab.MergeRequest{
-							BasicMergeRequest: gitlab.BasicMergeRequest{
-								IID:          46,
-								SourceBranch: "Branch2",
-								TargetBranch: "Branch1",
-							},
-						}, nil, nil
-					})
+			httpMocks: []stacks.HttpMock{
+				stacks.MockStackUser(),
+				stacks.MockPostStackMR("Branch1", "jawn", "3"),
+				stacks.MockPostStackMR("Branch2", "Branch1", "3"),
 			},
 		},
 	}
@@ -385,13 +213,13 @@ func Test_stackSync(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			git.InitGitRepoWithCommit(t)
 
-			testClient := gitlabtesting.NewTestClient(t)
-			tc.setupMocks(t, testClient)
+			fakeHTTP := stacks.SetupMocks(tc.httpMocks)
+			defer fakeHTTP.Verify(t)
 
 			ctrl := gomock.NewController(t)
 			mockCmd := git_testing.NewMockGitRunner(ctrl)
 
-			f, opts := setupTestFactory(t, testClient)
+			f, opts := setupTestFactory(t, fakeHTTP)
 
 			err := git.SetConfig("glab.currentstack", tc.args.stack.title)
 			require.NoError(t, err)

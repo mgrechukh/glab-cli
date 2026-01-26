@@ -36,7 +36,7 @@ func TestEnvKeyEquivalence(t *testing.T) {
 			autologinEnabled: true,
 			inCi:             true,
 			givenKey:         "api_host",
-			expectedKeys:     []string{"CI_SERVER_FQDN"},
+			expectedKeys:     []string{"GITLAB_API_HOST", "CI_SERVER_FQDN"},
 		},
 		{
 			autologinEnabled: false,
@@ -60,7 +60,7 @@ func TestEnvKeyEquivalence(t *testing.T) {
 			autologinEnabled: true,
 			inCi:             true,
 			givenKey:         "api_protocol",
-			expectedKeys:     []string{"CI_SERVER_PROTOCOL"},
+			expectedKeys:     []string{"API_PROTOCOL", "CI_SERVER_PROTOCOL"},
 		},
 		{
 			autologinEnabled: false,
@@ -84,7 +84,7 @@ func TestEnvKeyEquivalence(t *testing.T) {
 			autologinEnabled: true,
 			inCi:             true,
 			givenKey:         "host",
-			expectedKeys:     []string{"CI_SERVER_FQDN"},
+			expectedKeys:     []string{"GITLAB_HOST", "GITLAB_URI", "GL_HOST", "CI_SERVER_FQDN"},
 		},
 		{
 			autologinEnabled: false,
@@ -108,7 +108,7 @@ func TestEnvKeyEquivalence(t *testing.T) {
 			autologinEnabled: true,
 			inCi:             true,
 			givenKey:         "job_token",
-			expectedKeys:     []string{"CI_JOB_TOKEN"},
+			expectedKeys:     []string{"JOB_TOKEN", "CI_JOB_TOKEN"},
 		},
 		{
 			autologinEnabled: false,
@@ -132,7 +132,7 @@ func TestEnvKeyEquivalence(t *testing.T) {
 			autologinEnabled: true,
 			inCi:             true,
 			givenKey:         "ca_cert",
-			expectedKeys:     []string{"CI_SERVER_TLS_CA_FILE"},
+			expectedKeys:     []string{"CA_CERT", "CI_SERVER_TLS_CA_FILE"},
 		},
 		{
 			autologinEnabled: false,
@@ -156,7 +156,7 @@ func TestEnvKeyEquivalence(t *testing.T) {
 			autologinEnabled: true,
 			inCi:             true,
 			givenKey:         "client_cert",
-			expectedKeys:     []string{"CI_SERVER_TLS_CERT_FILE"},
+			expectedKeys:     []string{"CLIENT_CERT", "CI_SERVER_TLS_CERT_FILE"},
 		},
 		{
 			autologinEnabled: false,
@@ -180,7 +180,7 @@ func TestEnvKeyEquivalence(t *testing.T) {
 			autologinEnabled: true,
 			inCi:             true,
 			givenKey:         "client_key",
-			expectedKeys:     []string{"CI_SERVER_TLS_KEY_FILE"},
+			expectedKeys:     []string{"CLIENT_KEY", "CI_SERVER_TLS_KEY_FILE"},
 		},
 	}
 

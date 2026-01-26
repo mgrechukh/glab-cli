@@ -4,18 +4,16 @@ package ask
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/survivorbat/huhtest"
 
-	gitlab "gitlab.com/gitlab-org/api/client-go"
-
 	"gitlab.com/gitlab-org/cli/internal/api"
 	"gitlab.com/gitlab-org/cli/internal/glinstance"
 	"gitlab.com/gitlab-org/cli/internal/testing/cmdtest"
+	"gitlab.com/gitlab-org/cli/internal/testing/httpmock"
 	"gitlab.com/gitlab-org/cli/test"
 )
 
@@ -74,18 +72,15 @@ The appropriate git log --pretty=format:'%h' Git command non-git cmd for listing
 
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			fakeHTTP := &httpmock.Mocker{
+				MatchURL: httpmock.PathAndQuerystring,
+			}
+			defer fakeHTTP.Verify(t)
+
 			body := `{"predictions": [{ "candidates": [ {"content": "` + tc.content + `"} ]}]}`
 
-			// Create test server for the AI endpoint
-			testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method == http.MethodPost && r.URL.Path == "/api/v4/ai/llm/git_command" {
-					w.WriteHeader(http.StatusOK)
-					_, _ = w.Write([]byte(body))
-					return
-				}
-				w.WriteHeader(http.StatusNotFound)
-			}))
-			defer testServer.Close()
+			response := httpmock.NewStringResponse(http.StatusOK, body)
+			fakeHTTP.RegisterResponder(http.MethodPost, "/api/v4/ai/llm/git_command", response)
 
 			if tc.withPrompt {
 				cs, restore := test.InitCmdStubber()
@@ -94,23 +89,12 @@ The appropriate git log --pretty=format:'%h' Git command non-git cmd for listing
 				cs.Stub(cmdShowResult)
 			}
 
-			// Create a GitLab client with the test server's URL
-			gitlabClient, err := gitlab.NewClient("test-token", gitlab.WithBaseURL(testServer.URL+"/api/v4"))
-			require.NoError(t, err)
-
-			apiClient, err := api.NewClient(
-				func(*http.Client) (gitlab.AuthSource, error) {
-					return gitlab.AccessTokenAuthSource{Token: "test-token"}, nil
-				},
-				api.WithGitLabClient(gitlabClient),
-			)
-			require.NoError(t, err)
-
 			opts := []cmdtest.FactoryOption{
 				func(f *cmdtest.Factory) {
 					f.ApiClientStub = func(repoHost string) (*api.Client, error) {
 						require.Equal(t, tc.expectedGlInstanceHostname, repoHost)
-						return apiClient, nil
+
+						return cmdtest.NewTestApiClient(t, &http.Client{Transport: fakeHTTP}, "", tc.withGlInstanceHostname), nil
 					}
 				},
 				cmdtest.WithBaseRepo("OWNER", "REPO", tc.withGlInstanceHostname),
@@ -149,8 +133,6 @@ The appropriate git log --pretty=format:'%h' Git command non-git cmd for listing
 }
 
 func TestFailedHttpResponse(t *testing.T) {
-	t.Parallel()
-
 	tests := []struct {
 		desc        string
 		code        int
@@ -179,37 +161,20 @@ func TestFailedHttpResponse(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			t.Parallel()
+			fakeHTTP := &httpmock.Mocker{
+				MatchURL: httpmock.PathAndQuerystring,
+			}
+			defer fakeHTTP.Verify(t)
 
-			// Create test server for the AI endpoint
-			testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method == http.MethodPost && r.URL.Path == "/api/v4/ai/llm/git_command" {
-					w.WriteHeader(tc.code)
-					_, _ = w.Write([]byte(tc.response))
-					return
-				}
-				w.WriteHeader(http.StatusNotFound)
-			}))
-			defer testServer.Close()
-
-			// Create a GitLab client with the test server's URL
-			gitlabClient, err := gitlab.NewClient("test-token", gitlab.WithBaseURL(testServer.URL+"/api/v4"))
-			require.NoError(t, err)
-
-			apiClient, err := api.NewClient(
-				func(*http.Client) (gitlab.AuthSource, error) {
-					return gitlab.AccessTokenAuthSource{Token: "test-token"}, nil
-				},
-				api.WithGitLabClient(gitlabClient),
-			)
-			require.NoError(t, err)
+			response := httpmock.NewStringResponse(tc.code, tc.response)
+			fakeHTTP.RegisterResponder(http.MethodPost, "/api/v4/ai/llm/git_command", response)
 
 			exec := cmdtest.SetupCmdForTest(t, NewCmdAsk, false,
-				cmdtest.WithApiClient(apiClient),
+				cmdtest.WithApiClient(cmdtest.NewTestApiClient(t, &http.Client{Transport: fakeHTTP}, "", "")),
 				cmdtest.WithBaseRepo("OWNER", "REPO", ""),
 			)
 
-			_, err = exec("git list 10 commits")
+			_, err := exec("git list 10 commits")
 			require.EqualError(t, err, tc.expectedMsg)
 		})
 	}

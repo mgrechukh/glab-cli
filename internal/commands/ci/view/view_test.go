@@ -3,6 +3,7 @@
 package view
 
 import (
+	"net/http"
 	"os/exec"
 	"strings"
 	"testing"
@@ -12,13 +13,11 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 	"github.com/stretchr/testify/assert"
-	"go.uber.org/mock/gomock"
 
-	gitlab "gitlab.com/gitlab-org/api/client-go"
-	gitlabtesting "gitlab.com/gitlab-org/api/client-go/testing"
-
+	"gitlab.com/gitlab-org/cli/internal/glinstance"
 	"gitlab.com/gitlab-org/cli/internal/run"
 	"gitlab.com/gitlab-org/cli/internal/testing/cmdtest"
+	"gitlab.com/gitlab-org/cli/internal/testing/httpmock"
 	"gitlab.com/gitlab-org/cli/test"
 )
 
@@ -1159,6 +1158,25 @@ func Test_handleNavigation(t *testing.T) {
 	}
 }
 
+func runCommand(t *testing.T, rt http.RoundTripper, cli string) (*test.CmdOut, error, func()) {
+	t.Helper()
+
+	ios, _, stdout, stderr := cmdtest.TestIOStreams(cmdtest.WithTestIOStreamsAsTTY(true))
+	factory := cmdtest.NewTestFactory(ios,
+		cmdtest.WithGitLabClient(cmdtest.NewTestApiClient(t, &http.Client{Transport: rt}, "", glinstance.DefaultHostname).Lab()),
+	)
+
+	cmd := NewCmdView(factory)
+
+	restoreCmd := run.SetPrepareCmd(func(cmd *exec.Cmd) run.Runnable {
+		return &test.OutputStub{}
+	})
+
+	cmdOut, err := cmdtest.ExecuteCommand(cmd, cli, stdout, stderr)
+
+	return cmdOut, err, restoreCmd
+}
+
 func Test_bracketEscaper(t *testing.T) {
 	t.Parallel()
 
@@ -1216,80 +1234,90 @@ func Test_bracketEscaper(t *testing.T) {
 }
 
 func TestCIView(t *testing.T) {
-	createdAt, _ := time.Parse(time.RFC3339, "2025-10-28T16:52:39.000+01:00")
-
-	type testCase struct {
-		name           string
-		cli            string
-		setupMock      func(tc *gitlabtesting.TestClient)
-		expectedOutput string
+	type httpMock struct {
+		method string
+		path   string
+		status int
+		body   string
 	}
 
-	tests := []testCase{
+	tests := []struct {
+		name      string
+		cli       string
+		httpMocks []httpMock
+
+		expectedOutput string
+	}{
 		{
 			name: "view ci pipeline on web for a given branch",
 			cli:  "--web --branch foo",
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockPipelines.EXPECT().
-					GetLatestPipeline("OWNER/REPO", gomock.Any()).
-					Return(&gitlab.Pipeline{
-						ID:        8,
-						Ref:       "foo",
-						SHA:       "2dc6aa325a317eda67812f05600bdf0fcdc70ab0",
-						Status:    "created",
-						WebURL:    "https://gitlab.com/OWNER/REPO/-/pipelines/225",
-						CreatedAt: &createdAt,
-					}, nil, nil)
-
-				// GetPipelineWithFallback checks if pipeline has jobs
-				tc.MockJobs.EXPECT().
-					ListPipelineJobs("OWNER/REPO", int64(8), gomock.Any(), gomock.Any()).
-					Return([]*gitlab.Job{{ID: 1}}, nil, nil)
-
-				tc.MockCommits.EXPECT().
-					GetCommit("OWNER/REPO", "2dc6aa325a317eda67812f05600bdf0fcdc70ab0", gomock.Any(), gomock.Any()).
-					Return(&gitlab.Commit{
-						ID: "2dc6aa325a317eda67812f05600bdf0fcdc70ab0",
-						LastPipeline: &gitlab.PipelineInfo{
-							ID:        8,
-							Ref:       "foo",
-							SHA:       "2dc6aa325a317eda67812f05600bdf0fcdc70ab0",
-							Status:    "created",
-							WebURL:    "https://gitlab.com/OWNER/REPO/-/pipelines/225",
-							CreatedAt: &createdAt,
+			httpMocks: []httpMock{
+				{
+					http.MethodGet,
+					"https://gitlab.com/api/v4/projects/OWNER%2FREPO/pipelines/latest?ref=foo",
+					http.StatusOK,
+					`{
+						"id": 8,
+						"ref": "foo",
+						"sha": "2dc6aa325a317eda67812f05600bdf0fcdc70ab0",
+						"status": "created",
+						"web_url": "https://gitlab.com/OWNER/REPO/-/pipelines/225",
+						"created_at": "2025-10-28T16:52:39.000+01:00"
+					}`,
+				},
+				{
+					http.MethodGet,
+					"https://gitlab.com/api/v4/projects/OWNER%2FREPO/repository/commits/2dc6aa325a317eda67812f05600bdf0fcdc70ab0",
+					http.StatusOK,
+					`{
+						"id": "2dc6aa325a317eda67812f05600bdf0fcdc70ab0",
+						"last_pipeline": {
+							"id": 8,
+							"ref": "foo",
+							"sha": "2dc6aa325a317eda67812f05600bdf0fcdc70ab0",
+							"status": "created",
+							"web_url": "https://gitlab.com/OWNER/REPO/-/pipelines/225",
+							"created_at": "2025-10-28T16:52:39.000+01:00"
 						},
-						Status: gitlab.Ptr(gitlab.Running),
-					}, nil, nil)
+						"status": "running"
+					}`,
+				},
 			},
 			expectedOutput: "Opening gitlab.com/OWNER/REPO/-/pipelines/225 in your browser.\n",
 		},
 		{
 			name: "view ci pipeline on web for a given pipeline id",
 			cli:  "--web --pipelineid 5",
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockPipelines.EXPECT().
-					GetPipeline("OWNER/REPO", int64(5), gomock.Any()).
-					Return(&gitlab.Pipeline{
-						ID:        5,
-						WebURL:    "https://gitlab.com/OWNER/REPO/-/pipelines/5",
-						CreatedAt: &createdAt,
-						SHA:       "2dc6aa325a317eda67812f05600bdf0fcdc70ab0",
-					}, nil, nil)
-
-				tc.MockCommits.EXPECT().
-					GetCommit("OWNER/REPO", "2dc6aa325a317eda67812f05600bdf0fcdc70ab0", gomock.Any(), gomock.Any()).
-					Return(&gitlab.Commit{
-						ID: "6104942438c14ec7bd21c6cd5bd995272b3faff6",
-						LastPipeline: &gitlab.PipelineInfo{
-							ID:        5,
-							Ref:       "main",
-							SHA:       "2dc6aa325a317eda67812f05600bdf0fcdc70ab0",
-							Status:    "created",
-							WebURL:    "https://gitlab.com/OWNER/REPO/-/pipelines/225",
-							CreatedAt: &createdAt,
+			httpMocks: []httpMock{
+				{
+					http.MethodGet,
+					"https://gitlab.com/api/v4/projects/OWNER%2FREPO/pipelines/5",
+					http.StatusOK,
+					`
+					{
+						"id": 5,
+						"web_url": "https://gitlab.com/OWNER/REPO/-/pipelines/5",
+						"created_at": "2025-10-28T16:52:39.000+01:00",
+						"sha": "2dc6aa325a317eda67812f05600bdf0fcdc70ab0"
+					}`,
+				},
+				{
+					http.MethodGet,
+					"https://gitlab.com/api/v4/projects/OWNER%2FREPO/repository/commits/2dc6aa325a317eda67812f05600bdf0fcdc70ab0",
+					http.StatusOK,
+					`{
+						"id": "6104942438c14ec7bd21c6cd5bd995272b3faff6",
+						"last_pipeline": {
+							"id": 5,
+							"ref": "main",
+							"sha": "2dc6aa325a317eda67812f05600bdf0fcdc70ab0",
+							"status": "created",
+							"web_url": "https://gitlab.com/OWNER/REPO/-/pipelines/225",
+							"created_at": "2025-10-28T16:52:39.000+01:00"
 						},
-						Status: gitlab.Ptr(gitlab.Running),
-					}, nil, nil)
+						"status": "running"
+					}`,
+				},
 			},
 			expectedOutput: "Opening gitlab.com/OWNER/REPO/-/pipelines/5 in your browser.\n",
 		},
@@ -1297,18 +1325,17 @@ func TestCIView(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			testClient := gitlabtesting.NewTestClient(t)
-			tc.setupMock(testClient)
+			fakeHTTP := &httpmock.Mocker{
+				MatchURL: httpmock.FullURL,
+			}
+			defer fakeHTTP.Verify(t)
 
-			restoreCmd := run.SetPrepareCmd(func(cmd *exec.Cmd) run.Runnable {
-				return &test.OutputStub{}
-			})
+			for _, mock := range tc.httpMocks {
+				fakeHTTP.RegisterResponder(mock.method, mock.path, httpmock.NewStringResponse(mock.status, mock.body))
+			}
+
+			output, err, restoreCmd := runCommand(t, fakeHTTP, tc.cli)
 			defer restoreCmd()
-
-			exec := cmdtest.SetupCmdForTest(t, NewCmdView, true,
-				cmdtest.WithGitLabClient(testClient.Client),
-			)
-			output, err := exec(tc.cli)
 
 			if assert.NoErrorf(t, err, "error running command `ci view %s`: %v", tc.cli, err) {
 				assert.Empty(t, output.String())

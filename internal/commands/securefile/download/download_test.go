@@ -15,6 +15,7 @@ import (
 	gitlabtesting "gitlab.com/gitlab-org/api/client-go/testing"
 
 	"gitlab.com/gitlab-org/cli/internal/testing/cmdtest"
+	"gitlab.com/gitlab-org/cli/test"
 )
 
 const (
@@ -322,11 +323,7 @@ func Test_SecurefileDownload(t *testing.T) {
 			testClient := gitlabtesting.NewTestClient(t)
 			tc.setupMocks(testClient)
 
-			exec := cmdtest.SetupCmdForTest(t, NewCmdDownload, false,
-				cmdtest.WithGitLabClient(testClient.Client),
-			)
-			out, err := exec(tc.cli)
-
+			out, err := runCommand(testClient, tc.cli)
 			if tc.wantErr {
 				if assert.Error(t, err) {
 					require.Equal(t, tc.wantStderr, err.Error())
@@ -608,11 +605,7 @@ func Test_SecurefileDownloadAll(t *testing.T) {
 			testClient := gitlabtesting.NewTestClient(t)
 			tc.setupMocks(testClient)
 
-			exec := cmdtest.SetupCmdForTest(t, NewCmdDownload, false,
-				cmdtest.WithGitLabClient(testClient.Client),
-			)
-			out, err := exec(tc.cli)
-
+			out, err := runCommand(testClient, tc.cli)
 			if tc.wantErr {
 				if assert.Error(t, err) {
 					require.Equal(t, tc.wantStderr, err.Error())
@@ -652,4 +645,13 @@ func TestEnsureDirectoryExists_InvalidDirectory(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "error creating directory")
+}
+
+func runCommand(testClient *gitlabtesting.TestClient, cli string) (*test.CmdOut, error) {
+	ios, _, stdout, stderr := cmdtest.TestIOStreams()
+	factory := cmdtest.NewTestFactory(ios,
+		cmdtest.WithGitLabClient(testClient.Client),
+	)
+	cmd := NewCmdDownload(factory)
+	return cmdtest.ExecuteCommand(cmd, cli, stdout, stderr)
 }

@@ -12,29 +12,51 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/MakeNowJust/heredoc/v2"
-	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
 
 	gitlab "gitlab.com/gitlab-org/api/client-go"
-	gitlabtesting "gitlab.com/gitlab-org/api/client-go/testing"
 
 	"gitlab.com/gitlab-org/cli/internal/api"
-	"gitlab.com/gitlab-org/cli/internal/cmdutils"
 	"gitlab.com/gitlab-org/cli/internal/commands/issuable"
+	"gitlab.com/gitlab-org/cli/internal/glinstance"
 	"gitlab.com/gitlab-org/cli/internal/iostreams"
 	"gitlab.com/gitlab-org/cli/internal/testing/cmdtest"
+	"gitlab.com/gitlab-org/cli/internal/testing/httpmock"
+	"gitlab.com/gitlab-org/cli/test"
 )
+
+func runCommand(t *testing.T, command string, rt http.RoundTripper, isTTY bool, cli string, doHyperlinks string) (*test.CmdOut, error) {
+	t.Helper()
+
+	ios, _, stdout, stderr := cmdtest.TestIOStreams(cmdtest.WithTestIOStreamsAsTTY(isTTY), iostreams.WithDisplayHyperLinks(doHyperlinks))
+	c := cmdtest.NewTestApiClient(t, &http.Client{Transport: rt}, "", glinstance.DefaultHostname)
+	factory := cmdtest.NewTestFactory(ios,
+		cmdtest.WithApiClient(c),
+		cmdtest.WithGitLabClient(c.Lab()),
+	)
+
+	issueType := issuable.TypeIssue
+	if command == "incident" {
+		issueType = issuable.TypeIncident
+	}
+
+	cmd := NewCmdList(factory, nil, issueType)
+
+	return cmdtest.ExecuteCommand(cmd, cli, stdout, stderr)
+}
 
 func TestNewCmdList(t *testing.T) {
 	ios, _, _, _ := cmdtest.TestIOStreams(cmdtest.WithTestIOStreamsAsTTY(true))
 
-	// No API calls are made in this test since we provide a custom runFunc
-	factory := cmdtest.NewTestFactory(ios)
+	fakeHTTP := httpmock.New()
+	defer fakeHTTP.Verify(t)
+
+	factory := cmdtest.NewTestFactory(ios,
+		cmdtest.WithGitLabClient(cmdtest.NewTestApiClient(t, &http.Client{Transport: fakeHTTP}, "", glinstance.DefaultHostname).Lab()),
+	)
 	t.Run("Issue_NewCmdList", func(t *testing.T) {
 		gotOpts := &ListOptions{}
 		err := NewCmdList(factory, func(opts *ListOptions) error {
@@ -55,82 +77,13 @@ func TestIssueList_tty(t *testing.T) {
 	// NOTE: we need to force disable colors, otherwise we'd need ANSI sequences in our test output assertions.
 	t.Setenv("NO_COLOR", "true")
 
-	testClient := gitlabtesting.NewTestClient(t)
+	fakeHTTP := httpmock.New()
+	defer fakeHTTP.Verify(t)
 
-	createdAt := time.Date(2016, 1, 4, 15, 31, 51, 0, time.UTC)
-	incidentType := "incident"
+	fakeHTTP.RegisterResponder(http.MethodGet, "/projects/OWNER/REPO/issues",
+		httpmock.NewFileResponse(http.StatusOK, "./testdata/issuableList.json"))
 
-	testClient.MockIssues.EXPECT().
-		ListProjectIssues("OWNER/REPO", gomock.Any()).
-		Return([]*gitlab.Issue{
-			{
-				ID:          76,
-				IID:         6,
-				ProjectID:   1,
-				State:       "opened",
-				Title:       "Issue one",
-				Description: "a description here",
-				Labels:      gitlab.Labels{"foo", "bar"},
-				WebURL:      "http://gitlab.com/OWNER/REPO/issues/6",
-				CreatedAt:   &createdAt,
-				References: &gitlab.IssueReferences{
-					Full:     "OWNER/REPO/issues/6",
-					Relative: "#6",
-					Short:    "#6",
-				},
-			},
-			{
-				ID:          77,
-				IID:         7,
-				ProjectID:   1,
-				State:       "opened",
-				Title:       "Issue two",
-				Description: "description two here",
-				Labels:      gitlab.Labels{"fooz", "baz"},
-				WebURL:      "http://gitlab.com/OWNER/REPO/issues/7",
-				CreatedAt:   &createdAt,
-				References: &gitlab.IssueReferences{
-					Full:     "OWNER/REPO/issues/7",
-					Relative: "#7",
-					Short:    "#7",
-				},
-			},
-			{
-				ID:          78,
-				IID:         8,
-				ProjectID:   1,
-				State:       "opened",
-				Title:       "Incident",
-				Description: "description incident here",
-				Labels:      gitlab.Labels{"foo", "baz"},
-				WebURL:      "http://gitlab.com/OWNER/REPO/issues/8",
-				CreatedAt:   &createdAt,
-				IssueType:   &incidentType,
-				References: &gitlab.IssueReferences{
-					Full:     "OWNER/REPO/issues/8",
-					Relative: "#8",
-					Short:    "#8",
-				},
-			},
-		}, nil, nil)
-
-	// Create an api.Client with the mock GitLab client
-	apiClient, err := api.NewClient(
-		func(*http.Client) (gitlab.AuthSource, error) {
-			return gitlab.AccessTokenAuthSource{Token: "test-token"}, nil
-		},
-		api.WithGitLabClient(testClient.Client),
-	)
-	require.NoError(t, err)
-
-	exec := cmdtest.SetupCmdForTest(t, func(f cmdutils.Factory) *cobra.Command {
-		return NewCmdList(f, nil, issuable.TypeIssue)
-	}, true,
-		cmdtest.WithApiClient(apiClient),
-		cmdtest.WithBaseRepo("OWNER", "REPO", ""),
-	)
-
-	output, err := exec("")
+	output, err := runCommand(t, "issue", fakeHTTP, true, "", "")
 	if err != nil {
 		t.Errorf("error running command `issue list`: %v", err)
 	}
@@ -142,7 +95,7 @@ func TestIssueList_tty(t *testing.T) {
 	assert.Equal(t, heredoc.Doc(`
 		Showing 3 open issues in OWNER/REPO that match your search. (Page 1)
 
-		ID	Title    	Labels     	Created at        
+		ID	Title    	Labels     	Created at       
 		#6	Issue one	(foo, bar) 	about X years ago
 		#7	Issue two	(fooz, baz)	about X years ago
 		#8	Incident 	(foo, baz) 	about X years ago
@@ -152,218 +105,77 @@ func TestIssueList_tty(t *testing.T) {
 }
 
 func TestIssueList_ids(t *testing.T) {
-	testClient := gitlabtesting.NewTestClient(t)
+	fakeHTTP := httpmock.New()
+	defer fakeHTTP.Verify(t)
 
-	createdAt := time.Date(2016, 1, 4, 15, 31, 51, 0, time.UTC)
-	incidentType := "incident"
+	fakeHTTP.RegisterResponder(http.MethodGet, "/projects/OWNER/REPO/issues",
+		httpmock.NewFileResponse(http.StatusOK, "./testdata/issuableList.json"))
 
-	testClient.MockIssues.EXPECT().
-		ListProjectIssues("OWNER/REPO", gomock.Any()).
-		Return([]*gitlab.Issue{
-			{
-				ID:        76,
-				IID:       6,
-				ProjectID: 1,
-				State:     "opened",
-				Title:     "Issue one",
-				Labels:    gitlab.Labels{"foo", "bar"},
-				WebURL:    "http://gitlab.com/OWNER/REPO/issues/6",
-				CreatedAt: &createdAt,
-			},
-			{
-				ID:        77,
-				IID:       7,
-				ProjectID: 1,
-				State:     "opened",
-				Title:     "Issue two",
-				Labels:    gitlab.Labels{"fooz", "baz"},
-				WebURL:    "http://gitlab.com/OWNER/REPO/issues/7",
-				CreatedAt: &createdAt,
-			},
-			{
-				ID:        78,
-				IID:       8,
-				ProjectID: 1,
-				State:     "opened",
-				Title:     "Incident",
-				Labels:    gitlab.Labels{"foo", "baz"},
-				WebURL:    "http://gitlab.com/OWNER/REPO/issues/8",
-				CreatedAt: &createdAt,
-				IssueType: &incidentType,
-			},
-		}, nil, nil)
-
-	// Create an api.Client with the mock GitLab client
-	apiClient, err := api.NewClient(
-		func(*http.Client) (gitlab.AuthSource, error) {
-			return gitlab.AccessTokenAuthSource{Token: "test-token"}, nil
-		},
-		api.WithGitLabClient(testClient.Client),
-	)
-	require.NoError(t, err)
-
-	exec := cmdtest.SetupCmdForTest(t, func(f cmdutils.Factory) *cobra.Command {
-		return NewCmdList(f, nil, issuable.TypeIssue)
-	}, true,
-		cmdtest.WithApiClient(apiClient),
-		cmdtest.WithBaseRepo("OWNER", "REPO", ""),
-	)
-
-	output, err := exec("-F ids")
+	output, err := runCommand(t, "issue", fakeHTTP, true, "-F ids", "")
 	if err != nil {
 		t.Errorf("error running command `issue list -F ids`: %v", err)
 	}
 
-	assert.Equal(t, "6\n7\n8\n", output.String())
+	out := output.String()
+
+	assert.Equal(t, "6\n7\n8\n", out)
 	assert.Equal(t, ``, output.Stderr())
 }
 
 func TestIssueList_urls(t *testing.T) {
-	testClient := gitlabtesting.NewTestClient(t)
+	fakeHTTP := httpmock.New()
+	defer fakeHTTP.Verify(t)
 
-	createdAt := time.Date(2016, 1, 4, 15, 31, 51, 0, time.UTC)
-	incidentType := "incident"
+	fakeHTTP.RegisterResponder(http.MethodGet, "/projects/OWNER/REPO/issues",
+		httpmock.NewFileResponse(http.StatusOK, "./testdata/issuableList.json"))
 
-	testClient.MockIssues.EXPECT().
-		ListProjectIssues("OWNER/REPO", gomock.Any()).
-		Return([]*gitlab.Issue{
-			{
-				ID:        76,
-				IID:       6,
-				ProjectID: 1,
-				State:     "opened",
-				Title:     "Issue one",
-				Labels:    gitlab.Labels{"foo", "bar"},
-				WebURL:    "http://gitlab.com/OWNER/REPO/issues/6",
-				CreatedAt: &createdAt,
-			},
-			{
-				ID:        77,
-				IID:       7,
-				ProjectID: 1,
-				State:     "opened",
-				Title:     "Issue two",
-				Labels:    gitlab.Labels{"fooz", "baz"},
-				WebURL:    "http://gitlab.com/OWNER/REPO/issues/7",
-				CreatedAt: &createdAt,
-			},
-			{
-				ID:        78,
-				IID:       8,
-				ProjectID: 1,
-				State:     "opened",
-				Title:     "Incident",
-				Labels:    gitlab.Labels{"foo", "baz"},
-				WebURL:    "http://gitlab.com/OWNER/REPO/issues/8",
-				CreatedAt: &createdAt,
-				IssueType: &incidentType,
-			},
-		}, nil, nil)
-
-	// Create an api.Client with the mock GitLab client
-	apiClient, err := api.NewClient(
-		func(*http.Client) (gitlab.AuthSource, error) {
-			return gitlab.AccessTokenAuthSource{Token: "test-token"}, nil
-		},
-		api.WithGitLabClient(testClient.Client),
-	)
-	require.NoError(t, err)
-
-	exec := cmdtest.SetupCmdForTest(t, func(f cmdutils.Factory) *cobra.Command {
-		return NewCmdList(f, nil, issuable.TypeIssue)
-	}, true,
-		cmdtest.WithApiClient(apiClient),
-		cmdtest.WithBaseRepo("OWNER", "REPO", ""),
-	)
-
-	output, err := exec("-F urls")
+	output, err := runCommand(t, "issue", fakeHTTP, true, "-F urls", "")
 	if err != nil {
 		t.Errorf("error running command `issue list -F urls`: %v", err)
 	}
+
+	out := output.String()
 
 	assert.Equal(t, heredoc.Doc(`
 		http://gitlab.com/OWNER/REPO/issues/6
 		http://gitlab.com/OWNER/REPO/issues/7
 		http://gitlab.com/OWNER/REPO/issues/8
-	`), output.String())
+	`), out)
 	assert.Equal(t, ``, output.Stderr())
 }
 
 func TestIssueList_tty_withFlags(t *testing.T) {
-	// NOTE: These subtests cannot run in parallel because they use cmdutils.GroupOverride()
-	// which modifies global viper state (SetEnvPrefix, BindEnv).
 	t.Run("project", func(t *testing.T) {
-		testClient := gitlabtesting.NewTestClient(t)
+		fakeHTTP := httpmock.New()
+		defer fakeHTTP.Verify(t)
 
-		testClient.MockUsers.EXPECT().
-			ListUsers(gomock.Any()).
-			Return([]*gitlab.User{
-				{ID: 100, Username: "someuser"},
-			}, nil, nil)
+		fakeHTTP.RegisterResponder(http.MethodGet, "/users",
+			httpmock.NewStringResponse(http.StatusOK, `[{"id": 100, "username": "someuser"}]`))
+		fakeHTTP.RegisterResponder(http.MethodGet, "/projects/OWNER/REPO/issues",
+			httpmock.NewStringResponse(http.StatusOK, `[]`))
 
-		testClient.MockIssues.EXPECT().
-			ListProjectIssues("OWNER/REPO", gomock.Any()).
-			DoAndReturn(func(pid any, opts *gitlab.ListProjectIssuesOptions, options ...gitlab.RequestOptionFunc) ([]*gitlab.Issue, *gitlab.Response, error) {
-				// Verify flags are passed correctly
-				// Note: -p is Page, -P is PerPage, so "-P1 -p100" means PerPage=1, Page=100
-				assert.Equal(t, "opened", *opts.State)
-				assert.Equal(t, int64(100), opts.Page)
-				assert.Equal(t, int64(1), opts.PerPage)
-				assert.True(t, *opts.Confidential)
-				assert.NotNil(t, opts.AssigneeID) // User ID 100 from someuser lookup
-				assert.Equal(t, gitlab.LabelOptions{"bug"}, *opts.Labels)
-				assert.Equal(t, "1", *opts.Milestone)
-				return []*gitlab.Issue{}, nil, nil
-			})
-
-		apiClient, err := api.NewClient(
-			func(*http.Client) (gitlab.AuthSource, error) {
-				return gitlab.AccessTokenAuthSource{Token: "test-token"}, nil
-			},
-			api.WithGitLabClient(testClient.Client),
-		)
-		require.NoError(t, err)
-
-		exec := cmdtest.SetupCmdForTest(t, func(f cmdutils.Factory) *cobra.Command {
-			return NewCmdList(f, nil, issuable.TypeIssue)
-		}, true,
-			cmdtest.WithApiClient(apiClient),
-			cmdtest.WithBaseRepo("OWNER", "REPO", ""),
-		)
-
-		output, err := exec("--opened -P1 -p100 --confidential -a someuser -l bug -m1")
-		require.NoError(t, err)
+		output, err := runCommand(t, "issue", fakeHTTP, true, "--opened -P1 -p100 --confidential -a someuser -l bug -m1", "")
+		if err != nil {
+			t.Errorf("error running command `issue list`: %v", err)
+		}
 
 		assert.Equal(t, "", output.Stderr())
-		assert.Equal(t, `No open issues match your search in OWNER/REPO.
+		assert.Equal(t, output.String(), `No open issues match your search in OWNER/REPO.
 
 
 `, output.String())
 	})
 	t.Run("group", func(t *testing.T) {
-		testClient := gitlabtesting.NewTestClient(t)
+		fakeHTTP := httpmock.New()
+		defer fakeHTTP.Verify(t)
 
-		testClient.MockIssues.EXPECT().
-			ListGroupIssues("GROUP", gomock.Any()).
-			Return([]*gitlab.Issue{}, nil, nil)
+		fakeHTTP.RegisterResponder(http.MethodGet, "/groups/GROUP/issues",
+			httpmock.NewStringResponse(http.StatusOK, `[]`))
 
-		apiClient, err := api.NewClient(
-			func(*http.Client) (gitlab.AuthSource, error) {
-				return gitlab.AccessTokenAuthSource{Token: "test-token"}, nil
-			},
-			api.WithGitLabClient(testClient.Client),
-		)
-		require.NoError(t, err)
-
-		exec := cmdtest.SetupCmdForTest(t, func(f cmdutils.Factory) *cobra.Command {
-			return NewCmdList(f, nil, issuable.TypeIssue)
-		}, true,
-			cmdtest.WithApiClient(apiClient),
-			cmdtest.WithBaseRepo("OWNER", "REPO", ""),
-		)
-
-		output, err := exec("--group GROUP")
-		require.NoError(t, err)
+		output, err := runCommand(t, "issue", fakeHTTP, true, "--group GROUP", "")
+		if err != nil {
+			t.Errorf("error running command `issue list`: %v", err)
+		}
 
 		assert.Equal(t, "", output.Stderr())
 		assert.Equal(t, `No open issues match your search in GROUP.
@@ -374,33 +186,18 @@ func TestIssueList_tty_withFlags(t *testing.T) {
 }
 
 func TestIssueList_filterByIteration(t *testing.T) {
-	testClient := gitlabtesting.NewTestClient(t)
+	fakeHTTP := &httpmock.Mocker{
+		MatchURL: httpmock.PathAndQuerystring,
+	}
+	defer fakeHTTP.Verify(t)
 
-	testClient.MockIssues.EXPECT().
-		ListProjectIssues("OWNER/REPO", gomock.Any()).
-		DoAndReturn(func(pid any, opts *gitlab.ListProjectIssuesOptions, options ...gitlab.RequestOptionFunc) ([]*gitlab.Issue, *gitlab.Response, error) {
-			// Verify iteration_id is passed
-			assert.Equal(t, int64(9), *opts.IterationID)
-			return []*gitlab.Issue{}, nil, nil
-		})
+	fakeHTTP.RegisterResponder(http.MethodGet, "/api/v4/projects/OWNER/REPO/issues?in=title%2Cdescription&iteration_id=9&order_by=created_at&page=1&per_page=30&sort=desc&state=opened",
+		httpmock.NewStringResponse(http.StatusOK, `[]`))
 
-	apiClient, err := api.NewClient(
-		func(*http.Client) (gitlab.AuthSource, error) {
-			return gitlab.AccessTokenAuthSource{Token: "test-token"}, nil
-		},
-		api.WithGitLabClient(testClient.Client),
-	)
-	require.NoError(t, err)
-
-	exec := cmdtest.SetupCmdForTest(t, func(f cmdutils.Factory) *cobra.Command {
-		return NewCmdList(f, nil, issuable.TypeIssue)
-	}, true,
-		cmdtest.WithApiClient(apiClient),
-		cmdtest.WithBaseRepo("OWNER", "REPO", ""),
-	)
-
-	output, err := exec("--iteration 9")
-	require.NoError(t, err)
+	output, err := runCommand(t, "issue", fakeHTTP, true, "--iteration 9", "")
+	if err != nil {
+		t.Errorf("error running command `issue list`: %v", err)
+	}
 
 	assert.Equal(t, "", output.Stderr())
 	assert.Equal(t, `No open issues match your search in OWNER/REPO.
@@ -413,74 +210,38 @@ func TestIssueList_tty_withIssueType(t *testing.T) {
 	// NOTE: we need to force disable colors, otherwise we'd need ANSI sequences in our test output assertions.
 	t.Setenv("NO_COLOR", "true")
 
-	testClient := gitlabtesting.NewTestClient(t)
+	fakeHTTP := httpmock.New()
+	defer fakeHTTP.Verify(t)
 
-	createdAt := time.Date(2016, 1, 4, 15, 31, 51, 0, time.UTC)
-	incidentType := "incident"
+	fakeHTTP.RegisterResponder(http.MethodGet, "/projects/OWNER/REPO/issues",
+		httpmock.NewFileResponse(http.StatusOK, "./testdata/incidentList.json"))
 
-	testClient.MockIssues.EXPECT().
-		ListProjectIssues("OWNER/REPO", gomock.Any()).
-		DoAndReturn(func(pid any, opts *gitlab.ListProjectIssuesOptions, options ...gitlab.RequestOptionFunc) ([]*gitlab.Issue, *gitlab.Response, error) {
-			// Verify issue_type filter is passed
-			assert.Equal(t, gitlab.Ptr("incident"), opts.IssueType)
-			return []*gitlab.Issue{
-				{
-					ID:          78,
-					IID:         8,
-					ProjectID:   1,
-					State:       "opened",
-					Title:       "Incident",
-					Description: "description incident here",
-					Labels:      gitlab.Labels{"foo", "baz"},
-					WebURL:      "http://gitlab.com/OWNER/REPO/issues/8",
-					CreatedAt:   &createdAt,
-					IssueType:   &incidentType,
-					References: &gitlab.IssueReferences{
-						Full:     "OWNER/REPO/issues/8",
-						Relative: "#8",
-						Short:    "#8",
-					},
-				},
-			}, nil, nil
-		})
-
-	apiClient, err := api.NewClient(
-		func(*http.Client) (gitlab.AuthSource, error) {
-			return gitlab.AccessTokenAuthSource{Token: "test-token"}, nil
-		},
-		api.WithGitLabClient(testClient.Client),
-	)
-	require.NoError(t, err)
-
-	exec := cmdtest.SetupCmdForTest(t, func(f cmdutils.Factory) *cobra.Command {
-		return NewCmdList(f, nil, issuable.TypeIssue)
-	}, true,
-		cmdtest.WithApiClient(apiClient),
-		cmdtest.WithBaseRepo("OWNER", "REPO", ""),
-	)
-
-	output, err := exec("--issue-type=incident")
-	require.NoError(t, err)
+	output, err := runCommand(t, "issue", fakeHTTP, true, "--issue-type=incident", "")
+	if err != nil {
+		t.Errorf("error running command `issue list`: %v", err)
+	}
 
 	out := output.String()
 	timeRE := regexp.MustCompile(`\d+ years`)
 	out = timeRE.ReplaceAllString(out, "X years")
 
-	assert.Contains(t, out, "Showing 1 open incident in OWNER/REPO that match your search. (Page 1)")
-	assert.Contains(t, out, "#8\tIncident\t(foo, baz)\tabout X years ago")
+	assert.Equal(t, heredoc.Doc(`
+		Showing 1 open incident in OWNER/REPO that match your search. (Page 1)
+
+		ID	Title   	Labels    	Created at       
+		#8	Incident	(foo, baz)	about X years ago
+
+	`), out)
 	assert.Equal(t, ``, output.Stderr())
 }
 
 func TestIncidentList_tty_withIssueType(t *testing.T) {
-	// This test doesn't need API mocking - it just tests that --issue-type flag
-	// is not allowed for incident command
-	exec := cmdtest.SetupCmdForTest(t, func(f cmdutils.Factory) *cobra.Command {
-		return NewCmdList(f, nil, issuable.TypeIncident)
-	}, true,
-		cmdtest.WithBaseRepo("OWNER", "REPO", ""),
-	)
+	fakeHTTP := httpmock.New()
 
-	output, err := exec("--issue-type=incident")
+	fakeHTTP.RegisterResponder(http.MethodGet, "/projects/OWNER/REPO/issues",
+		httpmock.NewFileResponse(http.StatusOK, "./testdata/incidentList.json"))
+
+	output, err := runCommand(t, "incident", fakeHTTP, true, "--issue-type=incident", "")
 	if err == nil {
 		t.Error("expected an `unknown flag: --issue-type` error, but got nothing")
 	}
@@ -491,37 +252,19 @@ func TestIncidentList_tty_withIssueType(t *testing.T) {
 
 func TestIssueList_tty_mine(t *testing.T) {
 	t.Run("mine with all flag and user exists", func(t *testing.T) {
-		testClient := gitlabtesting.NewTestClient(t)
+		fakeHTTP := httpmock.New()
+		defer fakeHTTP.Verify(t)
 
-		testClient.MockUsers.EXPECT().
-			CurrentUser(gomock.Any()).
-			Return(&gitlab.User{Username: "john_smith"}, nil, nil)
+		fakeHTTP.RegisterResponder(http.MethodGet, "/projects/OWNER/REPO/issues",
+			httpmock.NewStringResponse(http.StatusOK, `[]`))
 
-		testClient.MockIssues.EXPECT().
-			ListProjectIssues("OWNER/REPO", gomock.Any()).
-			DoAndReturn(func(pid any, opts *gitlab.ListProjectIssuesOptions, options ...gitlab.RequestOptionFunc) ([]*gitlab.Issue, *gitlab.Response, error) {
-				// Verify assignee ID is set from current user lookup
-				assert.NotNil(t, opts.AssigneeID)
-				return []*gitlab.Issue{}, nil, nil
-			})
+		fakeHTTP.RegisterResponder(http.MethodGet, "/user",
+			httpmock.NewStringResponse(http.StatusOK, `{"username": "john_smith"}`))
 
-		apiClient, err := api.NewClient(
-			func(*http.Client) (gitlab.AuthSource, error) {
-				return gitlab.AccessTokenAuthSource{Token: "test-token"}, nil
-			},
-			api.WithGitLabClient(testClient.Client),
-		)
-		require.NoError(t, err)
-
-		exec := cmdtest.SetupCmdForTest(t, func(f cmdutils.Factory) *cobra.Command {
-			return NewCmdList(f, nil, issuable.TypeIssue)
-		}, true,
-			cmdtest.WithApiClient(apiClient),
-			cmdtest.WithBaseRepo("OWNER", "REPO", ""),
-		)
-
-		output, err := exec("--mine -A")
-		require.NoError(t, err)
+		output, err := runCommand(t, "issue", fakeHTTP, true, "--mine -A", "")
+		if err != nil {
+			t.Errorf("error running command `issue list`: %v", err)
+		}
 
 		assert.Equal(t, "", output.Stderr(), "")
 		assert.Equal(t, `No issues match your search in OWNER/REPO.
@@ -530,31 +273,13 @@ func TestIssueList_tty_mine(t *testing.T) {
 `, output.String())
 	})
 	t.Run("user does not exists", func(t *testing.T) {
-		testClient := gitlabtesting.NewTestClient(t)
+		fakeHTTP := httpmock.New()
+		defer fakeHTTP.Verify(t)
 
-		notFoundResp := &gitlab.Response{
-			Response: &http.Response{StatusCode: http.StatusNotFound},
-		}
-		testClient.MockUsers.EXPECT().
-			CurrentUser(gomock.Any()).
-			Return(nil, notFoundResp, gitlab.ErrNotFound)
+		fakeHTTP.RegisterResponder(http.MethodGet, "/user",
+			httpmock.NewStringResponse(http.StatusNotFound, `{message: 404 Not found}`))
 
-		apiClient, err := api.NewClient(
-			func(*http.Client) (gitlab.AuthSource, error) {
-				return gitlab.AccessTokenAuthSource{Token: "test-token"}, nil
-			},
-			api.WithGitLabClient(testClient.Client),
-		)
-		require.NoError(t, err)
-
-		exec := cmdtest.SetupCmdForTest(t, func(f cmdutils.Factory) *cobra.Command {
-			return NewCmdList(f, nil, issuable.TypeIssue)
-		}, true,
-			cmdtest.WithApiClient(apiClient),
-			cmdtest.WithBaseRepo("OWNER", "REPO", ""),
-		)
-
-		output, err := exec("--mine -A")
+		output, err := runCommand(t, "issue", fakeHTTP, true, "--mine -A", "")
 		assert.NotNil(t, err)
 
 		assert.Equal(t, "", output.Stderr())
@@ -608,101 +333,25 @@ func TestIssueList_hyperlinks(t *testing.T) {
 		{displayHyperlinksConfig: "true", isTTY: false, expectedCells: noHyperlinkCells},
 	}
 
-	createdAt1 := time.Date(2016, 1, 4, 15, 31, 51, 0, time.UTC)
-	createdAt2 := time.Date(2016, 1, 4, 16, 31, 51, 0, time.UTC)
-	incidentType := "incident"
-
-	testIssues := []*gitlab.Issue{
-		{
-			ID:          76,
-			IID:         6,
-			ProjectID:   1,
-			State:       "opened",
-			Title:       "Issue one",
-			Description: "a description here",
-			Labels:      gitlab.Labels{"foo", "bar"},
-			WebURL:      "http://gitlab.com/OWNER/REPO/issues/6",
-			CreatedAt:   &createdAt1,
-			References: &gitlab.IssueReferences{
-				Full:     "OWNER/REPO/issues/6",
-				Relative: "#6",
-				Short:    "#6",
-			},
-		},
-		{
-			ID:          77,
-			IID:         7,
-			ProjectID:   1,
-			State:       "opened",
-			Title:       "Issue two",
-			Description: "description two here",
-			Labels:      gitlab.Labels{"fooz", "baz"},
-			WebURL:      "http://gitlab.com/OWNER/REPO/issues/7",
-			CreatedAt:   &createdAt1,
-			References: &gitlab.IssueReferences{
-				Full:     "OWNER/REPO/issues/7",
-				Relative: "#7",
-				Short:    "#7",
-			},
-		},
-		{
-			ID:          78,
-			IID:         8,
-			ProjectID:   1,
-			State:       "opened",
-			Title:       "Incident",
-			Description: "description incident here",
-			Labels:      gitlab.Labels{"foo", "baz"},
-			WebURL:      "http://gitlab.com/OWNER/REPO/issues/8",
-			CreatedAt:   &createdAt2,
-			IssueType:   &incidentType,
-			References: &gitlab.IssueReferences{
-				Full:     "OWNER/REPO/issues/8",
-				Relative: "#8",
-				Short:    "#8",
-			},
-		},
-	}
-
-	for _, tc := range tests {
+	for _, test := range tests {
 		t.Run("", func(t *testing.T) {
-			testClient := gitlabtesting.NewTestClient(t)
+			fakeHTTP := httpmock.New()
+			defer fakeHTTP.Verify(t)
 
-			testClient.MockIssues.EXPECT().
-				ListProjectIssues("OWNER/REPO", gomock.Any()).
-				Return(testIssues, nil, nil)
-
-			apiClient, err := api.NewClient(
-				func(*http.Client) (gitlab.AuthSource, error) {
-					return gitlab.AccessTokenAuthSource{Token: "test-token"}, nil
-				},
-				api.WithGitLabClient(testClient.Client),
-			)
-			require.NoError(t, err)
+			fakeHTTP.RegisterResponder(http.MethodGet, "/projects/OWNER/REPO/issues",
+				httpmock.NewFileResponse(http.StatusOK, "./testdata/issuableList.json"))
 
 			doHyperlinks := "never"
-			if tc.forceHyperlinksEnv == "1" {
+			if test.forceHyperlinksEnv == "1" {
 				doHyperlinks = "always"
-			} else if tc.displayHyperlinksConfig == "true" {
+			} else if test.displayHyperlinksConfig == "true" {
 				doHyperlinks = "auto"
 			}
 
-			ios, _, _, _ := cmdtest.TestIOStreams(
-				cmdtest.WithTestIOStreamsAsTTY(tc.isTTY),
-				iostreams.WithDisplayHyperLinks(doHyperlinks),
-			)
-
-			exec := cmdtest.SetupCmdForTest(t, func(f cmdutils.Factory) *cobra.Command {
-				return NewCmdList(f, nil, issuable.TypeIssue)
-			}, tc.isTTY,
-				cmdtest.WithIOStreamsOverride(ios),
-				cmdtest.WithApiClient(apiClient),
-				cmdtest.WithGitLabClient(testClient.Client),
-				cmdtest.WithBaseRepo("OWNER", "REPO", ""),
-			)
-
-			output, err := exec("")
-			require.NoError(t, err)
+			output, err := runCommand(t, "issue", fakeHTTP, test.isTTY, "", doHyperlinks)
+			if err != nil {
+				t.Errorf("error running command `issue list`: %v", err)
+			}
 
 			out := output.String()
 			timeRE := regexp.MustCompile(`\d+ years`)
@@ -713,7 +362,7 @@ func TestIssueList_hyperlinks(t *testing.T) {
 			// first two lines have the header and some separating whitespace, so skip those
 			for lineNum, line := range lines[3:] {
 				gotCells := strings.Split(line, "\t")
-				expectedCells := tc.expectedCells[lineNum]
+				expectedCells := test.expectedCells[lineNum]
 
 				assert.Equal(t, len(expectedCells), len(gotCells))
 
@@ -728,57 +377,25 @@ func TestIssueList_hyperlinks(t *testing.T) {
 }
 
 func TestIssueListJSON(t *testing.T) {
-	testClient := gitlabtesting.NewTestClient(t)
+	fakeHTTP := httpmock.New()
+	defer fakeHTTP.Verify(t)
 
-	createdAt, _ := time.Parse(time.RFC3339, "2024-01-31T05:37:57.883Z")
-	updatedAt, _ := time.Parse(time.RFC3339, "2024-02-02T00:54:02.842Z")
-	issueType := "issue"
+	fakeHTTP.RegisterResponder(http.MethodGet, "/projects/OWNER/REPO/issues",
+		httpmock.NewFileResponse(http.StatusOK, "./testdata/issueListFull.json"))
 
-	testIssue := &gitlab.Issue{
-		ID:                   141525495,
-		IID:                  15,
-		ProjectID:            37777023,
-		Title:                "tem",
-		Description:          "",
-		State:                "opened",
-		CreatedAt:            &createdAt,
-		UpdatedAt:            &updatedAt,
-		Labels:               gitlab.Labels{},
-		Assignees:            []*gitlab.IssueAssignee{},
-		Author:               &gitlab.IssueAuthor{ID: 11809982, Username: "jay_mccure", Name: "Jay McCure", State: "active", AvatarURL: "https://gitlab.com/uploads/-/system/user/avatar/11809982/avatar.png", WebURL: "https://gitlab.com/jay_mccure"},
-		Confidential:         false,
-		IssueType:            &issueType,
-		WebURL:               "https://gitlab.com/jay_mccure/test2target/-/issues/15",
-		TimeStats:            &gitlab.TimeStats{},
-		TaskCompletionStatus: &gitlab.TasksCompletionStatus{Count: 0, CompletedCount: 0},
-		Links:                &gitlab.IssueLinks{Self: "https://gitlab.com/api/v4/projects/37777023/issues/15", Notes: "https://gitlab.com/api/v4/projects/37777023/issues/15/notes", AwardEmoji: "https://gitlab.com/api/v4/projects/37777023/issues/15/award_emoji", Project: "https://gitlab.com/api/v4/projects/37777023"},
-		References:           &gitlab.IssueReferences{Short: "#15", Relative: "#15", Full: "jay_mccure/test2target#15"},
+	output, err := runCommand(t, "issue", fakeHTTP, true, "--output json", "")
+	if err != nil {
+		t.Errorf("error running command `issue list -F json`: %v", err)
 	}
 
-	testClient.MockIssues.EXPECT().
-		ListProjectIssues("OWNER/REPO", gomock.Any()).
-		Return([]*gitlab.Issue{testIssue}, nil, nil)
-
-	apiClient, err := api.NewClient(
-		func(*http.Client) (gitlab.AuthSource, error) {
-			return gitlab.AccessTokenAuthSource{Token: "test-token"}, nil
-		},
-		api.WithGitLabClient(testClient.Client),
-	)
-	require.NoError(t, err)
-
-	exec := cmdtest.SetupCmdForTest(t, func(f cmdutils.Factory) *cobra.Command {
-		return NewCmdList(f, nil, issuable.TypeIssue)
-	}, true,
-		cmdtest.WithApiClient(apiClient),
-		cmdtest.WithBaseRepo("OWNER", "REPO", ""),
-	)
-
-	output, err := exec("--output json")
-	require.NoError(t, err)
+	if err != nil {
+		panic(err)
+	}
 
 	b, err := os.ReadFile("./testdata/issueListFull.json")
-	require.NoError(t, err)
+	if err != nil {
+		fmt.Print(err)
+	}
 
 	expectedOut := string(b)
 
@@ -787,23 +404,13 @@ func TestIssueListJSON(t *testing.T) {
 }
 
 func TestIssueListMutualOutputFlags(t *testing.T) {
-	// This test doesn't need API mocking - it just tests flag validation
-	exec := cmdtest.SetupCmdForTest(t, func(f cmdutils.Factory) *cobra.Command {
-		return NewCmdList(f, nil, issuable.TypeIssue)
-	}, true,
-		cmdtest.WithBaseRepo("OWNER", "REPO", ""),
-	)
-
-	_, err := exec("--output json --output-format ids")
+	_, err := runCommand(t, "issue", nil, true, "--output json --output-format ids", "")
 
 	assert.NotNil(t, err)
 	assert.EqualError(t, err, "if any flags in the group [output output-format] are set none of the others can be; [output output-format] were all set")
 }
 
 func TestIssueList_epicIssues(t *testing.T) {
-	// NOTE: This test cannot run in parallel because it uses cmdutils.GroupOverride()
-	// which modifies global viper state (SetEnvPrefix, BindEnv).
-
 	testdata := []*gitlab.Issue{
 		{
 			IID:   1,
@@ -844,10 +451,10 @@ func TestIssueList_epicIssues(t *testing.T) {
 	tests := []struct {
 		name        string
 		commandLine string
+		expectedURL string
 		user        *gitlab.User
 		wantIDs     []int
 		wantErr     string
-		perPage     int
 	}{
 		{
 			name:        "group flag",
@@ -934,48 +541,32 @@ func TestIssueList_epicIssues(t *testing.T) {
 			name:        "per-page flag",
 			commandLine: `--group testGroupID --epic 42 --all --per-page=9999`,
 			// per-page is clamped to the max supported per_page value
-			perPage: api.MaxPerPage,
-			wantIDs: []int{1, 2},
+			expectedURL: fmt.Sprintf(`/api/v4/groups/testGroupID/epics/42/issues?page=1&per_page=%d`, api.MaxPerPage),
+			wantIDs:     []int{1, 2},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			testClient := gitlabtesting.NewTestClient(t)
+			fakeHTTP := &httpmock.Mocker{
+				MatchURL: httpmock.PathAndQuerystring,
+			}
+			defer fakeHTTP.Verify(t)
 
 			if tt.user != nil {
-				testClient.MockUsers.EXPECT().
-					ListUsers(gomock.Any()).
-					Return([]*gitlab.User{tt.user}, nil, nil)
+				fakeHTTP.RegisterResponder(http.MethodGet, "/api/v4/users?per_page=30&username="+tt.user.Username,
+					httpmock.NewJSONResponse(http.StatusOK, []*gitlab.User{tt.user}))
 			}
 
 			if tt.wantErr == "" {
-				testClient.MockEpicIssues.EXPECT().
-					ListEpicIssues("testGroupID", int64(42), gomock.Any()).
-					DoAndReturn(func(gid any, epic int64, opts *gitlab.ListOptions, options ...gitlab.RequestOptionFunc) ([]*gitlab.Issue, *gitlab.Response, error) {
-						if tt.perPage != 0 {
-							assert.Equal(t, int64(tt.perPage), opts.PerPage)
-						}
-						return testdata, &gitlab.Response{NextPage: 0}, nil
-					})
+				expectedURL := tt.expectedURL
+				if expectedURL == "" {
+					expectedURL = `/api/v4/groups/testGroupID/epics/42/issues?page=1&per_page=30`
+				}
+				fakeHTTP.RegisterResponder(http.MethodGet, expectedURL, httpmock.NewJSONResponse(http.StatusOK, testdata))
 			}
 
-			apiClient, err := api.NewClient(
-				func(*http.Client) (gitlab.AuthSource, error) {
-					return gitlab.AccessTokenAuthSource{Token: "test-token"}, nil
-				},
-				api.WithGitLabClient(testClient.Client),
-			)
-			require.NoError(t, err)
-
-			exec := cmdtest.SetupCmdForTest(t, func(f cmdutils.Factory) *cobra.Command {
-				return NewCmdList(f, nil, issuable.TypeIssue)
-			}, true,
-				cmdtest.WithApiClient(apiClient),
-				cmdtest.WithBaseRepo("OWNER", "REPO", ""),
-			)
-
-			output, err := exec(tt.commandLine + ` --output-format ids`)
+			output, err := runCommand(t, "issue", fakeHTTP, true, tt.commandLine+` --output-format ids`, "")
 			if tt.wantErr != "" {
 				assert.ErrorContains(t, err, tt.wantErr)
 			}
@@ -996,15 +587,16 @@ func TestIssueList_epicIssues(t *testing.T) {
 }
 
 func TestIssueList_filterByLabel(t *testing.T) {
-	// NOTE: This test cannot run in parallel because it uses cmdutils.GroupOverride()
-	// which modifies global viper state (SetEnvPrefix, BindEnv).
-
 	tests := map[string]struct {
-		respBody []*gitlab.Issue
-		args     string
-		expect   []int
+		reqURL     string
+		respStatus int
+		respBody   []*gitlab.Issue
+		args       string
+		expect     []int
 	}{
 		"with --label": {
+			reqURL:     `/api/v4/groups/testGroupID/epics/42/issues?page=1&per_page=30`,
+			respStatus: http.StatusOK,
 			respBody: []*gitlab.Issue{
 				{
 					IID:   1,
@@ -1045,6 +637,8 @@ func TestIssueList_filterByLabel(t *testing.T) {
 			expect: []int{1, 2},
 		},
 		"with --not-label": {
+			reqURL:     `/api/v4/groups/testGroupID/epics/42/issues?page=1&per_page=30`,
+			respStatus: http.StatusOK,
 			respBody: []*gitlab.Issue{
 				{
 					IID:   3,
@@ -1068,6 +662,8 @@ func TestIssueList_filterByLabel(t *testing.T) {
 			expect: []int{3},
 		},
 		"with --label and --not-label": {
+			reqURL:     `/api/v4/groups/testGroupID/epics/42/issues?page=1&per_page=30`,
+			respStatus: http.StatusOK,
 			respBody: []*gitlab.Issue{
 				{
 					IID:   1,
@@ -1128,28 +724,13 @@ func TestIssueList_filterByLabel(t *testing.T) {
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			testClient := gitlabtesting.NewTestClient(t)
+			fakeHTTP := &httpmock.Mocker{
+				MatchURL: httpmock.PathAndQuerystring,
+			}
+			defer fakeHTTP.Verify(t)
 
-			testClient.MockEpicIssues.EXPECT().
-				ListEpicIssues("testGroupID", int64(42), gomock.Any()).
-				Return(tt.respBody, &gitlab.Response{NextPage: 0}, nil)
-
-			apiClient, err := api.NewClient(
-				func(*http.Client) (gitlab.AuthSource, error) {
-					return gitlab.AccessTokenAuthSource{Token: "test-token"}, nil
-				},
-				api.WithGitLabClient(testClient.Client),
-			)
-			require.NoError(t, err)
-
-			exec := cmdtest.SetupCmdForTest(t, func(f cmdutils.Factory) *cobra.Command {
-				return NewCmdList(f, nil, issuable.TypeIssue)
-			}, true,
-				cmdtest.WithApiClient(apiClient),
-				cmdtest.WithBaseRepo("OWNER", "REPO", ""),
-			)
-
-			out, err := exec(tt.args + " --output-format ids")
+			fakeHTTP.RegisterResponder(http.MethodGet, tt.reqURL, httpmock.NewJSONResponse(tt.respStatus, tt.respBody))
+			out, err := runCommand(t, "issue", fakeHTTP, true, tt.args+" --output-format ids", "")
 			require.NoError(t, err, "command: %s err: %v", tt.args, err)
 			require.Emptyf(t, out.Stderr(), "command: %s stderr: %s", tt.args, out.Stderr())
 

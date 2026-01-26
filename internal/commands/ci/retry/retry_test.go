@@ -3,160 +3,183 @@
 package retry
 
 import (
-	"fmt"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
 
-	gitlab "gitlab.com/gitlab-org/api/client-go"
-	gitlabtesting "gitlab.com/gitlab-org/api/client-go/testing"
-
+	"gitlab.com/gitlab-org/cli/internal/glinstance"
 	"gitlab.com/gitlab-org/cli/internal/testing/cmdtest"
+	"gitlab.com/gitlab-org/cli/internal/testing/httpmock"
+	"gitlab.com/gitlab-org/cli/test"
 )
+
+func runCommand(t *testing.T, rt http.RoundTripper, args string) (*test.CmdOut, error) {
+	t.Helper()
+
+	ios, _, stdout, stderr := cmdtest.TestIOStreams()
+	factory := cmdtest.NewTestFactory(ios,
+		cmdtest.WithGitLabClient(cmdtest.NewTestApiClient(t, &http.Client{Transport: rt}, "", glinstance.DefaultHostname).Lab()),
+	)
+
+	cmd := NewCmdRetry(factory)
+
+	return cmdtest.ExecuteCommand(cmd, args, stdout, stderr)
+}
 
 func TestCiRetry(t *testing.T) {
 	t.Parallel()
 
-	createdAt, _ := time.Parse(time.RFC3339, "2022-12-01T05:13:13.703Z")
-
-	// Response indicating last page
-	lastPageResponse := &gitlab.Response{
-		Response: &http.Response{StatusCode: http.StatusOK},
-		NextPage: 0,
+	type httpMock struct {
+		method string
+		path   string
+		status int
+		body   string
 	}
 
-	type testCase struct {
+	tests := []struct {
 		name           string
 		args           string
+		httpMocks      []httpMock
 		expectedError  string
 		expectedStderr string
 		expectedOut    string
-		setupMock      func(tc *gitlabtesting.TestClient)
-	}
-
-	tests := []testCase{
+	}{
 		{
 			name:        "when retry with job-id",
 			args:        "1122",
 			expectedOut: "Retried job (ID: 1123), status: pending, ref: branch-name, weburl: https://gitlab.com/OWNER/REPO/-/jobs/1123\n",
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockJobs.EXPECT().
-					RetryJob("OWNER/REPO", int64(1122), gomock.Any()).
-					Return(&gitlab.Job{
-						ID:           1123,
-						Status:       "pending",
-						Stage:        "build",
-						Name:         "build-job",
-						Ref:          "branch-name",
-						Tag:          false,
-						AllowFailure: false,
-						CreatedAt:    &createdAt,
-						WebURL:       "https://gitlab.com/OWNER/REPO/-/jobs/1123",
-					}, nil, nil)
+			httpMocks: []httpMock{
+				{
+					http.MethodPost,
+					"/api/v4/projects/OWNER/REPO/jobs/1122/retry",
+					http.StatusCreated,
+					`{
+						"id": 1123,
+						"status": "pending",
+						"stage": "build",
+						"name": "build-job",
+						"ref": "branch-name",
+						"tag": false,
+						"coverage": null,
+						"allow_failure": false,
+						"created_at": "2022-12-01T05:13:13.703Z",
+						"web_url": "https://gitlab.com/OWNER/REPO/-/jobs/1123"
+					}`,
+				},
 			},
 		},
 		{
 			name:          "when retry with job-id throws error",
 			args:          "1122",
-			expectedError: "403 Forbidden",
+			expectedError: "POST https://gitlab.com/api/v4/projects/OWNER%2FREPO/jobs/1122/retry: 403",
 			expectedOut:   "",
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				forbiddenResponse := &gitlab.Response{Response: &http.Response{StatusCode: http.StatusForbidden}}
-				tc.MockJobs.EXPECT().
-					RetryJob("OWNER/REPO", int64(1122), gomock.Any()).
-					Return(nil, forbiddenResponse, fmt.Errorf("403 Forbidden"))
+			httpMocks: []httpMock{
+				{
+					http.MethodPost,
+					"/api/v4/projects/OWNER/REPO/jobs/1122/retry",
+					http.StatusForbidden,
+					`{}`,
+				},
 			},
 		},
 		{
 			name:        "when retry with job-name",
 			args:        "lint -b main -p 123",
 			expectedOut: "Retried job (ID: 1123), status: pending, ref: branch-name, weburl: https://gitlab.com/OWNER/REPO/-/jobs/1123\n",
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockJobs.EXPECT().
-					ListPipelineJobs("OWNER/REPO", int64(123), gomock.Any()).
-					Return([]*gitlab.Job{
-						{
-							ID:     1122,
-							Name:   "lint",
-							Status: "failed",
-						},
-						{
-							ID:     1124,
-							Name:   "publish",
-							Status: "failed",
-						},
-					}, lastPageResponse, nil)
-
-				tc.MockJobs.EXPECT().
-					RetryJob("OWNER/REPO", int64(1122), gomock.Any()).
-					Return(&gitlab.Job{
-						ID:           1123,
-						Status:       "pending",
-						Stage:        "build",
-						Name:         "build-job",
-						Ref:          "branch-name",
-						Tag:          false,
-						AllowFailure: false,
-						CreatedAt:    &createdAt,
-						WebURL:       "https://gitlab.com/OWNER/REPO/-/jobs/1123",
-					}, nil, nil)
+			httpMocks: []httpMock{
+				{
+					http.MethodPost,
+					"/api/v4/projects/OWNER/REPO/jobs/1122/retry",
+					http.StatusCreated,
+					`{
+						"id": 1123,
+						"status": "pending",
+						"stage": "build",
+						"name": "build-job",
+						"ref": "branch-name",
+						"tag": false,
+						"coverage": null,
+						"allow_failure": false,
+						"created_at": "2022-12-01T05:13:13.703Z",
+						"web_url": "https://gitlab.com/OWNER/REPO/-/jobs/1123"
+					}`,
+				},
+				{
+					http.MethodGet,
+					"/api/v4/projects/OWNER%2FREPO/pipelines/123/jobs?page=1&per_page=20",
+					http.StatusOK,
+					`[{
+							"id": 1122,
+							"name": "lint",
+							"status": "failed"
+						}, {
+							"id": 1124,
+							"name": "publish",
+							"status": "failed"
+						}]`,
+				},
 			},
 		},
 		{
 			name:           "when retry with job-name throws error",
 			args:           "lint -b main -p 123",
-			expectedError:  "list pipeline jobs: 403 Forbidden",
+			expectedError:  "list pipeline jobs: GET https://gitlab.com/api/v4/projects/OWNER%2FREPO/pipelines/123/jobs: 403",
 			expectedStderr: "invalid job ID: lint\n",
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				forbiddenResponse := &gitlab.Response{Response: &http.Response{StatusCode: http.StatusForbidden}}
-				tc.MockJobs.EXPECT().
-					ListPipelineJobs("OWNER/REPO", int64(123), gomock.Any()).
-					Return(nil, forbiddenResponse, fmt.Errorf("403 Forbidden"))
+			httpMocks: []httpMock{
+				{
+					http.MethodGet,
+					"/api/v4/projects/OWNER%2FREPO/pipelines/123/jobs?page=1&per_page=20",
+					http.StatusForbidden,
+					`{}`,
+				},
 			},
 		},
 		{
 			name:        "when retry with job-name and last pipeline",
 			args:        "lint -b main",
 			expectedOut: "Retried job (ID: 1123), status: pending, ref: branch-name, weburl: https://gitlab.com/OWNER/REPO/-/jobs/1123\n",
-			setupMock: func(tc *gitlabtesting.TestClient) {
-				tc.MockPipelines.EXPECT().
-					GetLatestPipeline("OWNER/REPO", gomock.Any()).
-					Return(&gitlab.Pipeline{
-						ID: 123,
-					}, nil, nil)
-
-				tc.MockJobs.EXPECT().
-					ListPipelineJobs("OWNER/REPO", int64(123), gomock.Any()).
-					Return([]*gitlab.Job{
-						{
-							ID:     1122,
-							Name:   "lint",
-							Status: "failed",
-						},
-						{
-							ID:     1124,
-							Name:   "publish",
-							Status: "failed",
-						},
-					}, lastPageResponse, nil)
-
-				tc.MockJobs.EXPECT().
-					RetryJob("OWNER/REPO", int64(1122), gomock.Any()).
-					Return(&gitlab.Job{
-						ID:           1123,
-						Status:       "pending",
-						Stage:        "build",
-						Name:         "build-job",
-						Ref:          "branch-name",
-						Tag:          false,
-						AllowFailure: false,
-						CreatedAt:    &createdAt,
-						WebURL:       "https://gitlab.com/OWNER/REPO/-/jobs/1123",
-					}, nil, nil)
+			httpMocks: []httpMock{
+				{
+					http.MethodPost,
+					"/api/v4/projects/OWNER/REPO/jobs/1122/retry",
+					http.StatusCreated,
+					`{
+						"id": 1123,
+						"status": "pending",
+						"stage": "build",
+						"name": "build-job",
+						"ref": "branch-name",
+						"tag": false,
+						"coverage": null,
+						"allow_failure": false,
+						"created_at": "2022-12-01T05:13:13.703Z",
+						"web_url": "https://gitlab.com/OWNER/REPO/-/jobs/1123"
+					}`,
+				},
+				{
+					http.MethodGet,
+					"/api/v4/projects/OWNER%2FREPO/pipelines/latest?ref=main",
+					http.StatusOK,
+					`{
+						"id": 123
+					}`,
+				},
+				{
+					http.MethodGet,
+					"/api/v4/projects/OWNER%2FREPO/pipelines/123/jobs?page=1&per_page=20",
+					http.StatusOK,
+					`[{
+							"id": 1122,
+							"name": "lint",
+							"status": "failed"
+						}, {
+							"id": 1124,
+							"name": "publish",
+							"status": "failed"
+						}]`,
+				},
 			},
 		},
 	}
@@ -165,26 +188,22 @@ func TestCiRetry(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// GIVEN
-			testClient := gitlabtesting.NewTestClient(t)
-			tc.setupMock(testClient)
+			fakeHTTP := &httpmock.Mocker{
+				MatchURL: httpmock.PathAndQuerystring,
+			}
+			defer fakeHTTP.Verify(t)
 
-			exec := cmdtest.SetupCmdForTest(
-				t,
-				NewCmdRetry,
-				false,
-				cmdtest.WithGitLabClient(testClient.Client),
-			)
+			for _, mock := range tc.httpMocks {
+				fakeHTTP.RegisterResponder(mock.method, mock.path, httpmock.NewStringResponse(mock.status, mock.body))
+			}
 
-			// WHEN
-			output, err := exec(tc.args)
+			output, err := runCommand(t, fakeHTTP, tc.args)
 
-			// THEN
 			if tc.expectedError == "" {
-				require.NoError(t, err)
+				require.Nil(t, err)
 			} else {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.expectedError)
+				require.NotNil(t, err)
+				require.Equal(t, tc.expectedError, err.Error())
 			}
 
 			assert.Equal(t, tc.expectedOut, output.String())
